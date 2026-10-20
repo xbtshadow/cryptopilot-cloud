@@ -1,5 +1,4 @@
 import json
-import logging
 import time
 import urllib.request
 import urllib.parse
@@ -13,6 +12,12 @@ try:
     from eth_account import Account
 except ImportError:
     Account = None
+
+# ==========================================
+# 🛑 STOP-LOSS ET TAKE-PROFIT (Modifiables ici)
+# ==========================================
+STOP_LOSS_PERCENT = 5.0      
+TAKE_PROFIT_PERCENT = 15.0   
 
 REDIS_URL = os.getenv("REDIS_URL")
 r = None
@@ -35,15 +40,14 @@ def send_telegram_message(message, reply_markup=None):
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         req = urllib.request.Request(url, data=encoded_payload)
         urllib.request.urlopen(req, timeout=5)
-    except Exception as e: print(f"⚠️ Erreur Telegram : {e}")
+    except Exception: pass
 
 def get_main_keyboard():
     return {
         "inline_keyboard": [
-            [{"text": "📊 Statistiques", "callback_data": "stats"}],
+            [{"text": "📊 Stats", "callback_data": "stats"}, {"text": "🌐 Marché", "callback_data": "market"}],
             [{"text": "💰 Déposer", "callback_data": "deposit"}, {"text": "💸 Retirer", "callback_data": "withdraw"}],
-            [{"text": "🔑 Gérer mes Wallets", "callback_data": "manage_wallets"}],
-            [{"text": "💹 Prix Actuel", "callback_data": "price"}]
+            [{"text": "🔑 Mes Wallets", "callback_data": "manage_wallets"}]
         ]
     }
 
@@ -54,37 +58,30 @@ def get_wallets(chat_id):
     try:
         for slot in [1, 2]:
             data = r.get(f"wallet:{chat_id}:{slot}")
-            if data:
-                wallets[slot] = json.loads(data)
-    except Exception:
-        pass
+            if data: wallets[slot] = json.loads(data)
+    except Exception: pass
     return wallets
 
 def generate_wallet(chat_id, slot):
     if not r: return "❌ Erreur : Redis non connecté."
-    if not Account: return "❌ Erreur : librairie `eth-account` manquante."
-    
+    if not Account: return "❌ Erreur : `eth-account` manquant."
     try:
         acct = Account.create()
-        wallet_data = {"address": acct.address, "private_key": acct.key.hex()}
-        r.set(f"wallet:{chat_id}:{slot}", json.dumps(wallet_data))
+        r.set(f"wallet:{chat_id}:{slot}", json.dumps({"address": acct.address, "private_key": acct.key.hex()}))
         return f"✅ <b>Wallet {slot} généré !</b>\n📍 <code>{acct.address}</code>"
-    except Exception as e:
-        return f"❌ Erreur : {str(e)}"
+    except Exception as e: return f"❌ Erreur : {str(e)}"
 
 def delete_wallet(chat_id, slot):
     if not r: return "❌ Erreur : Redis non connecté."
     try:
         r.delete(f"wallet:{chat_id}:{slot}")
-        return f"🗑️ Le Wallet {slot} a été supprimé avec succès."
-    except Exception as e:
-        return f"❌ Erreur : {str(e)}"
+        return f"🗑️ Le Wallet {slot} a été supprimé."
+    except Exception as e: return f"❌ Erreur : {str(e)}"
 
 def show_wallet_manager(chat_id):
     wallets = get_wallets(chat_id)
     msg = "🔑 <b>Gestionnaire de Wallets</b>\n\n"
     buttons = []
-
     for slot in [1, 2]:
         if slot in wallets:
             msg += f"<b>Emplacement {slot} :</b>\n<code>{wallets[slot]['address']}</code>\n"
@@ -93,12 +90,26 @@ def show_wallet_manager(chat_id):
             msg += f"<b>Emplacement {slot} :</b> (Vide)\n"
             buttons.append([{"text": f"➕ Créer Wallet {slot}", "callback_data": f"create_{slot}"}])
         msg += "\n"
+    buttons.append([{"text": "⬅️ Retour", "callback_data": "back_menu"}])
+    return msg, {"inline_keyboard": buttons}
 
-    buttons.append([{"text": "⬅️ Retour au menu", "callback_data": "back_menu"}])
-    kb = {"inline_keyboard": buttons}
-    return msg, kb
+# --- MARCHÉ ---
+def get_market_prices():
+    url = 'https://api.binance.com/api/v3/ticker/price?symbols=["BNBUSDT","ETHUSDT","BTCUSDT","SOLUSDT"]'
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode())
+            msg = "🌐 <b>PRIX DU MARCHÉ</b> 🌐\n\n"
+            for item in data:
+                sym = item["symbol"].replace("USDT", "")
+                price = float(item["price"])
+                msg += f"💎 <b>{sym}</b> : {price:,.2f} $\n"
+            return msg
+    except Exception:
+        return "❌ Impossible de récupérer les prix."
 
-# --- GESTION DES COMMANDES TELEGRAM ---
+# --- COMMANDES TELEGRAM ---
 def listen_telegram_commands(state, config, price_history, pending_actions):
     last_update_id = 0
     while True:
@@ -118,8 +129,6 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                             
                             if text in ["/start", "/menu"]:
                                 send_telegram_message("🤖 <b>Menu Principal</b>", get_main_keyboard())
-                            elif text == "/stats":
-                                send_telegram_message(build_stats_message(state, config), get_main_keyboard())
                             elif chat_id in pending_actions:
                                 action = pending_actions[chat_id]["action"]
                                 try:
@@ -127,20 +136,20 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                                     if amount <= 0: raise ValueError
                                     
                                     if action == "deposit":
-                                        pending_actions[chat_id]["amount"] = amount # On garde le montant !
+                                        pending_actions[chat_id]["amount"] = amount
                                         confirm_kb = {"inline_keyboard": [[{"text": "✅ Confirmer", "callback_data": f"confirm_{action}"}], [{"text": "❌ Annuler", "callback_data": "cancel_action"}]]}
-                                        send_telegram_message(f"💰 Tu souhaites déposer <b>{amount:.2f} $</b>.\nConfirmes-tu ?", confirm_kb)
+                                        send_telegram_message(f"💰 Déposer <b>{amount:.2f} $</b> ?", confirm_kb)
                                     elif action == "withdraw":
                                         if amount > state["capital_usd"]:
-                                            send_telegram_message(f"❌ Fonds insuffisants. Ton capital de trading est de <b>{state['capital_usd']:.2f} $</b>.", get_main_keyboard())
-                                            del pending_actions[chat_id] # On annule l'action
+                                            send_telegram_message(f"❌ Fonds insuffisants. Capital : <b>{state['capital_usd']:.2f} $</b>.", get_main_keyboard())
+                                            del pending_actions[chat_id]
                                         else:
-                                            pending_actions[chat_id]["amount"] = amount # On garde le montant !
+                                            pending_actions[chat_id]["amount"] = amount
                                             confirm_kb = {"inline_keyboard": [[{"text": "✅ Confirmer", "callback_data": f"confirm_{action}"}], [{"text": "❌ Annuler", "callback_data": "cancel_action"}]]}
-                                            send_telegram_message(f"💸 Tu souhaites retirer <b>{amount:.2f} $</b>.\nConfirmes-tu ?", confirm_kb)
+                                            send_telegram_message(f"💸 Retirer <b>{amount:.2f} $</b> ?", confirm_kb)
                                 except ValueError:
-                                    send_telegram_message("❌ Montant invalide. Envoie un nombre positif (ex: 50).", get_main_keyboard())
-                                    del pending_actions[chat_id] # On annule l'action
+                                    send_telegram_message("❌ Montant invalide.", get_main_keyboard())
+                                    del pending_actions[chat_id]
 
                         elif "callback_query" in update:
                             callback = update["callback_query"]
@@ -149,7 +158,9 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                             
                             try:
                                 if data_cb == "stats":
-                                    send_telegram_message(build_stats_message(state, config), get_main_keyboard())
+                                    send_telegram_message(build_stats_message(state), get_main_keyboard())
+                                elif data_cb == "market":
+                                    send_telegram_message(get_market_prices(), get_main_keyboard())
                                 elif data_cb == "back_menu":
                                     pending_actions.pop(chat_id, None)
                                     send_telegram_message("🤖 <b>Menu Principal</b>", get_main_keyboard())
@@ -159,78 +170,75 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                                     send_telegram_message(msg, kb)
                                 elif data_cb.startswith("create_"):
                                     slot = int(data_cb.split("_")[1])
-                                    result = generate_wallet(chat_id, slot)
-                                    send_telegram_message(result)
+                                    send_telegram_message(generate_wallet(chat_id, slot))
                                     msg, kb = show_wallet_manager(chat_id)
                                     send_telegram_message(msg, kb)
                                 elif data_cb.startswith("delete_ask_"):
                                     slot = int(data_cb.split("_")[2])
-                                    confirm_kb = {"inline_keyboard": [
-                                        [{"text": "✅ Oui, supprimer", "callback_data": f"delete_confirm_{slot}"}],
-                                        [{"text": "❌ Annuler", "callback_data": "manage_wallets"}]
-                                    ]}
-                                    send_telegram_message(f"⚠️ Es-tu sûr de vouloir supprimer le Wallet {slot} ? Cette action est irréversible.", confirm_kb)
+                                    confirm_kb = {"inline_keyboard": [[{"text": "✅ Oui", "callback_data": f"delete_confirm_{slot}"}], [{"text": "❌ Non", "callback_data": "manage_wallets"}]]}
+                                    send_telegram_message(f"⚠️ Supprimer le Wallet {slot} ?", confirm_kb)
                                 elif data_cb.startswith("delete_confirm_"):
                                     slot = int(data_cb.split("_")[2])
-                                    result = delete_wallet(chat_id, slot)
-                                    send_telegram_message(result)
+                                    send_telegram_message(delete_wallet(chat_id, slot))
                                     msg, kb = show_wallet_manager(chat_id)
                                     send_telegram_message(msg, kb)
                                 elif data_cb == "deposit":
                                     pending_actions[chat_id] = {"action": "deposit", "amount": 0}
-                                    send_telegram_message("💰 <b>Dépôt</b>\nQuel montant en <b>$</b> souhaites-tu déposer ?\n(Envoie un nombre, ex: 50)", None)
+                                    send_telegram_message("💰 <b>Dépôt</b>\nQuel montant en $ ? (ex: 50)", None)
                                 elif data_cb == "withdraw":
                                     pending_actions[chat_id] = {"action": "withdraw", "amount": 0}
-                                    send_telegram_message("💸 <b>Retrait</b>\nQuel montant en <b>$</b> souhaites-tu retirer ?\n(Envoie un nombre, ex: 20)", None)
-                                
-                                # --- C'EST ICI QUE LE BUG ETAIT CORRIGE ---
+                                    send_telegram_message("💸 <b>Retrait</b>\nQuel montant en $ ? (ex: 20)", None)
                                 elif data_cb.startswith("confirm_"):
                                     action = data_cb.replace("confirm_", "")
                                     if chat_id in pending_actions and pending_actions[chat_id].get("amount", 0) > 0:
                                         amount = pending_actions[chat_id]["amount"]
                                         if action == "deposit":
                                             state["capital_usd"] += amount
-                                            send_telegram_message(f"✅ Dépôt de <b>{amount:.2f} $</b> effectué !", get_main_keyboard())
+                                            state["total_deposited"] = state.get("total_deposited", 0) + amount
+                                            save_state(state)
+                                            send_telegram_message(f"✅ Dépôt de <b>{amount:.2f} $</b> effectué !\n\n" + build_stats_message(state), get_main_keyboard())
                                         elif action == "withdraw":
                                             state["capital_usd"] -= amount
-                                            send_telegram_message(f"✅ Retrait de <b>{amount:.2f} $</b> effectué !", get_main_keyboard())
-                                        save_state(state)
+                                            state["total_deposited"] = state.get("total_deposited", 0) - amount
+                                            save_state(state)
+                                            send_telegram_message(f"✅ Retrait de <b>{amount:.2f} $</b> effectué !\n\n" + build_stats_message(state), get_main_keyboard())
                                     else:
                                         send_telegram_message("❌ Aucune opération en attente.", get_main_keyboard())
-                                    pending_actions.pop(chat_id, None) # On nettoie une fois terminé
-                                
+                                    pending_actions.pop(chat_id, None)
                                 elif data_cb == "cancel_action":
                                     pending_actions.pop(chat_id, None)
-                                    send_telegram_message("❌ Opération annulée.", get_main_keyboard())
-                                
-                                elif data_cb == "price":
-                                    if price_history:
-                                        send_telegram_message(f"💹 Prix : <b>{price_history[-1]:.3f} $</b>", get_main_keyboard())
+                                    send_telegram_message("❌ Annulé.", get_main_keyboard())
                             except Exception as e:
-                                send_telegram_message(f"❌ Erreur de traitement : {e}", get_main_keyboard())
+                                send_telegram_message(f"❌ Erreur : {e}", get_main_keyboard())
                             finally:
-                                try:
-                                    urllib.request.urlopen(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery?callback_query_id={callback['id']}")
+                                try: urllib.request.urlopen(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery?callback_query_id={callback['id']}")
                                 except: pass
-        except Exception as e: print(f"Erreur Telegram : {e}")
-        time.sleep(1)
+        except Exception: pass
+        time.sleep(2)
 
-def build_stats_message(state, config):
-    total = state["capital_usd"] + state["safe_capital_usd"]
+def build_stats_message(state):
     pos = "OUI" if state["position_open"] else "NON"
+    win_rate = 0
+    if state.get("total_trades", 0) > 0:
+        win_rate = (state.get("winning_trades", 0) / state["total_trades"]) * 100
+        
     return (f"📊 <b>TABLEAU DE BORD</b> 📊\n"
-            f"💰 Capital Trading : <b>{state['capital_usd']:.2f} $</b>\n"
-            f"🔒 Coffre-fort : <b>{state['safe_capital_usd']:.2f} $</b>\n"
-            f"💎 Total : <b>{total:.2f} $</b>\n"
+            f"🏦 Total Déposé : <b>{state.get('total_deposited', 0.0):.2f} $</b>\n"
+            f"💰 Capital Actuel : <b>{state['capital_usd']:.2f} $</b>\n"
+            f"──────────────────\n"
             f"📈 Position Ouverte : {pos}\n"
+            f"🛑 SL : -{STOP_LOSS_PERCENT}% | 🎯 TP : +{TAKE_PROFIT_PERCENT}%\n"
+            f"──────────────────\n"
+            f"📊 Trades : {state.get('total_trades', 0)} (Réussite: {win_rate:.1f}%)\n"
             f"💵 PnL Réalisé : {state['realized_pnl_usd']:+.4f} $\n"
             f"💸 Frais payés : {state['total_fees_usd']:.4f} $")
 
+# --- LOGIQUE DE TRADING ---
 def load_config(path="config.json"):
     try:
         with open(path, "r", encoding="utf-8") as f: return json.load(f)
     except Exception:
-        return {"initial_capital_usd": 100.0, "safe_capital_percentage": 50.0, "profit_secure_percentage": 80.0, "position_size_percent": 60.0, "stop_loss_percent": 5.0, "anti_crash_drop_percent": 30.0, "take_profit_percent": 15.0, "trailing_stop_activation_pct": 8.0, "trailing_stop_percent": 2.0, "ema_fast": 5, "ema_slow": 15, "rsi_period": 10, "estimated_gas_cost_usd": 0.15, "estimated_trading_fee_percent": 0.25, "estimated_slippage_percent": 0.5, "pair_address": "0x8040E01d9e5c9cCF7E4E6C34b1E90F9dEC20D994"}
+        return {"initial_capital_usd": 0.0, "position_size_percent": 60.0, "ema_fast": 5, "ema_slow": 15, "rsi_period": 10, "estimated_gas_cost_usd": 0.15, "estimated_trading_fee_percent": 0.25, "estimated_slippage_percent": 0.5, "pair_address": "0x16b9a82891338f9bA80E2D6970FddA79D1eb0daE"}
 
 def load_state(config):
     if r:
@@ -238,9 +246,7 @@ def load_state(config):
             data = r.get("cryptopilot_state")
             if data: return json.loads(data)
         except Exception: pass
-    total_capital = config.get("initial_capital_usd", 100.0)
-    safe_amount = total_capital * (config.get("safe_capital_percentage", 50.0) / 100.0)
-    return {"capital_usd": total_capital - safe_amount, "safe_capital_usd": safe_amount, "position_open": False, "position_amount_usd": 0.0, "entry_price": 0.0, "highest_price": 0.0, "total_fees_usd": 0.0, "realized_pnl_usd": 0.0}
+    return {"capital_usd": config.get("initial_capital_usd", 0.0), "total_deposited": 0.0, "position_open": False, "position_amount_usd": 0.0, "entry_price": 0.0, "total_fees_usd": 0.0, "realized_pnl_usd": 0.0, "total_trades": 0, "winning_trades": 0}
 
 def save_state(state):
     if r:
@@ -292,8 +298,9 @@ def calculate_rsi(prices, period=14):
     return 100 - (100 / (1 + rs))
 
 def simulate_buy(state, price, config):
+    if state["capital_usd"] < 1.0: return state
     try:
-        security_check = check_token_security("0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82")
+        security_check = check_token_security("0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c") # WBNB
         if not security_check["safe"]: return state
     except Exception: return state
 
@@ -309,9 +316,8 @@ def simulate_buy(state, price, config):
     state["position_open"] = True
     state["position_amount_usd"] = amount_usd
     state["entry_price"] = price
-    state["highest_price"] = price
     state["total_fees_usd"] += gas + fee
-    send_telegram_message(f"🚀 ACHAT !\nPrix : {price:.3f} $\nMontant : {amount_usd:.2f} $")
+    send_telegram_message(f"🚀 ACHAT !\nPrix : {price:.3f} $\nMontant : {amount_usd:.2f} $\nCapital restant : {state['capital_usd']:.2f} $")
     return state
 
 def simulate_sell(state, price, config, reason="Signal"):
@@ -331,15 +337,14 @@ def simulate_sell(state, price, config, reason="Signal"):
     state["position_open"] = False
     state["position_amount_usd"] = 0.0
     state["entry_price"] = 0.0
-    state["highest_price"] = 0.0
-
+    
+    # Statistiques
+    state["total_trades"] = state.get("total_trades", 0) + 1
     if pnl > 0:
-        secure_amount = pnl * (config.get("profit_secure_percentage", 80.0) / 100.0)
-        state["capital_usd"] -= secure_amount
-        state["safe_capital_usd"] += secure_amount
+        state["winning_trades"] = state.get("winning_trades", 0) + 1
 
     emoji = "💰" if pnl > 0 else "🛑"
-    send_telegram_message(f"{emoji} VENTE ({reason}) !\nPrix : {price:.3f} $\nPnL Net : {pnl:+.4f} $")
+    send_telegram_message(f"{emoji} VENTE ({reason}) !\nPrix : {price:.3f} $\nPnL Net : {pnl:+.4f} $\nCapital Actuel : {state['capital_usd']:.2f} $")
     return state
 
 class WebHandler(BaseHTTPRequestHandler):
@@ -364,37 +369,38 @@ def main():
     state = load_state(config)
     price_history = load_history()
     pending_actions = {}
+    
     threading.Thread(target=listen_telegram_commands, args=(state, config, price_history, pending_actions), daemon=True).start()
-    send_telegram_message("🤖 <b>Bot en ligne</b>\nTape /menu pour gérer tes wallets et voir tes stats.")
+    
+    send_telegram_message("🤖 <b>Bot CryptoPilot en ligne</b>\nBienvenue ! Utilise /menu pour faire ton premier dépôt et lancer le trading.")
 
     while True:
         try:
-            current_price = get_real_price(config.get("pair_address", "0x8040E01d9e5c9cCF7E4E6C34b1E90F9dEC20D994"))
-            if current_price:
-                price_history.append(current_price)
-                if len(price_history) > 100: price_history.pop(0)
-                save_history(price_history)
+            if state["capital_usd"] > 1.0:
+                current_price = get_real_price(config.get("pair_address", "0x16b9a82891338f9bA80E2D6970FddA79D1eb0daE"))
+                if current_price:
+                    price_history.append(current_price)
+                    if len(price_history) > 100: price_history.pop(0)
+                    save_history(price_history)
 
-                if len(price_history) >= config["ema_slow"]:
-                    ema_fast = calculate_ema(price_history, config["ema_fast"])
-                    ema_slow = calculate_ema(price_history, config["ema_slow"])
-                    rsi = calculate_rsi(price_history, config["rsi_period"])
+                    if len(price_history) >= config["ema_slow"]:
+                        ema_fast = calculate_ema(price_history, config["ema_fast"])
+                        ema_slow = calculate_ema(price_history, config["ema_slow"])
+                        rsi = calculate_rsi(price_history, config["rsi_period"])
 
-                    if not state["position_open"]:
-                        is_price_falling = len(price_history) >= 3 and current_price < price_history[-2]
-                        if ema_fast > ema_slow and rsi < 70 and not is_price_falling:
-                            state = simulate_buy(state, current_price, config)
-                    else:
-                        if current_price > state["highest_price"]: state["highest_price"] = current_price
-                        pnl_percent = ((current_price - state["entry_price"]) / state["entry_price"]) * 100
-                        drop_from_peak = ((state["highest_price"] - current_price) / state["highest_price"]) * 100
-                        
-                        if pnl_percent <= -config["anti_crash_drop_percent"]: state = simulate_sell(state, current_price, config, reason="ANTI-CRASH")
-                        elif pnl_percent >= config["take_profit_percent"]: state = simulate_sell(state, current_price, config, reason="TAKE-PROFIT")
-                        elif pnl_percent >= config["trailing_stop_activation_pct"] and drop_from_peak >= config["trailing_stop_percent"]: state = simulate_sell(state, current_price, config, reason="TRAILING STOP")
-                        elif pnl_percent <= -config["stop_loss_percent"]: state = simulate_sell(state, current_price, config, reason="STOP-LOSS")
+                        if not state["position_open"]:
+                            is_price_falling = len(price_history) >= 3 and current_price < price_history[-2]
+                            if ema_fast > ema_slow and rsi < 70 and not is_price_falling:
+                                state = simulate_buy(state, current_price, config)
+                        else:
+                            pnl_percent = ((current_price - state["entry_price"]) / state["entry_price"]) * 100
+                            
+                            if pnl_percent >= TAKE_PROFIT_PERCENT:
+                                state = simulate_sell(state, current_price, config, reason=f"TAKE-PROFIT (+{TAKE_PROFIT_PERCENT}%)")
+                            elif pnl_percent <= -STOP_LOSS_PERCENT:
+                                state = simulate_sell(state, current_price, config, reason=f"STOP-LOSS (-{STOP_LOSS_PERCENT}%)")
 
-                save_state(state)
+                    save_state(state)
         except Exception as e: print(f"Erreur : {e}")
         time.sleep(10)
 
