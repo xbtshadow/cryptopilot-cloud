@@ -14,7 +14,7 @@ except ImportError:
     Account = None
 
 # ==========================================
-# 🛑 STOP-LOSS ET TAKE-PROFIT (Modifiables ici)
+# 🛑 STOP-LOSS ET TAKE-PROFIT
 # ==========================================
 STOP_LOSS_PERCENT = 5.0      
 TAKE_PROFIT_PERCENT = 15.0   
@@ -64,7 +64,7 @@ def get_wallets(chat_id):
 
 def generate_wallet(chat_id, slot):
     if not r: return "❌ Erreur : Redis non connecté."
-    if not Account: return "❌ Erreur : `eth-account` manquant."
+    if not Account: return "❌ Erreur : librairie `eth-account` manquante."
     try:
         acct = Account.create()
         r.set(f"wallet:{chat_id}:{slot}", json.dumps({"address": acct.address, "private_key": acct.key.hex()}))
@@ -93,21 +93,22 @@ def show_wallet_manager(chat_id):
     buttons.append([{"text": "⬅️ Retour", "callback_data": "back_menu"}])
     return msg, {"inline_keyboard": buttons}
 
-# --- MARCHÉ ---
+# --- MARCHÉ (CORRIGÉ AVEC COINGECKO) ---
 def get_market_prices():
-    url = 'https://api.binance.com/api/v3/ticker/price?symbols=["BNBUSDT","ETHUSDT","BTCUSDT","SOLUSDT"]'
+    url = 'https://api.coingecko.com/api/v3/simple/price?ids=binancecoin,ethereum,bitcoin,solana&vs_currencies=usd'
     try:
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req, timeout=10) as response:
             data = json.loads(response.read().decode())
             msg = "🌐 <b>PRIX DU MARCHÉ</b> 🌐\n\n"
-            for item in data:
-                sym = item["symbol"].replace("USDT", "")
-                price = float(item["price"])
-                msg += f"💎 <b>{sym}</b> : {price:,.2f} $\n"
+            symbols = {"binancecoin": "BNB", "ethereum": "ETH", "bitcoin": "BTC", "solana": "SOL"}
+            for coin_id, sym in symbols.items():
+                if coin_id in data:
+                    price = data[coin_id]['usd']
+                    msg += f"💎 <b>{sym}</b> : {price:,.2f} $\n"
             return msg
     except Exception:
-        return "❌ Impossible de récupérer les prix."
+        return "❌ Impossible de récupérer les prix (API temporairement indisponible)."
 
 # --- COMMANDES TELEGRAM ---
 def listen_telegram_commands(state, config, price_history, pending_actions):
@@ -138,7 +139,7 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                                     if action == "deposit":
                                         pending_actions[chat_id]["amount"] = amount
                                         confirm_kb = {"inline_keyboard": [[{"text": "✅ Confirmer", "callback_data": f"confirm_{action}"}], [{"text": "❌ Annuler", "callback_data": "cancel_action"}]]}
-                                        send_telegram_message(f"💰 Déposer <b>{amount:.2f} $</b> ?", confirm_kb)
+                                        send_telegram_message(f"💰 Tu souhaites déposer <b>{amount:.2f} $</b>.\nConfirmes-tu ?", confirm_kb)
                                     elif action == "withdraw":
                                         if amount > state["capital_usd"]:
                                             send_telegram_message(f"❌ Fonds insuffisants. Capital : <b>{state['capital_usd']:.2f} $</b>.", get_main_keyboard())
@@ -146,9 +147,9 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                                         else:
                                             pending_actions[chat_id]["amount"] = amount
                                             confirm_kb = {"inline_keyboard": [[{"text": "✅ Confirmer", "callback_data": f"confirm_{action}"}], [{"text": "❌ Annuler", "callback_data": "cancel_action"}]]}
-                                            send_telegram_message(f"💸 Retirer <b>{amount:.2f} $</b> ?", confirm_kb)
+                                            send_telegram_message(f"💸 Tu souhaites retirer <b>{amount:.2f} $</b>.\nConfirmes-tu ?", confirm_kb)
                                 except ValueError:
-                                    send_telegram_message("❌ Montant invalide.", get_main_keyboard())
+                                    send_telegram_message("❌ Montant invalide. Envoie un nombre (ex: 50).", get_main_keyboard())
                                     del pending_actions[chat_id]
 
                         elif "callback_query" in update:
@@ -184,10 +185,10 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                                     send_telegram_message(msg, kb)
                                 elif data_cb == "deposit":
                                     pending_actions[chat_id] = {"action": "deposit", "amount": 0}
-                                    send_telegram_message("💰 <b>Dépôt</b>\nQuel montant en $ ? (ex: 50)", None)
+                                    send_telegram_message("💰 <b>Dépôt</b>\nQuel montant en $ souhaites-tu déposer ?\n(Envoie un nombre, ex: 50)", None)
                                 elif data_cb == "withdraw":
                                     pending_actions[chat_id] = {"action": "withdraw", "amount": 0}
-                                    send_telegram_message("💸 <b>Retrait</b>\nQuel montant en $ ? (ex: 20)", None)
+                                    send_telegram_message("💸 <b>Retrait</b>\nQuel montant en $ souhaites-tu retirer ?\n(Envoie un nombre, ex: 20)", None)
                                 elif data_cb.startswith("confirm_"):
                                     action = data_cb.replace("confirm_", "")
                                     if chat_id in pending_actions and pending_actions[chat_id].get("amount", 0) > 0:
@@ -199,7 +200,7 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                                             send_telegram_message(f"✅ Dépôt de <b>{amount:.2f} $</b> effectué !\n\n" + build_stats_message(state), get_main_keyboard())
                                         elif action == "withdraw":
                                             state["capital_usd"] -= amount
-                                            state["total_deposited"] = state.get("total_deposited", 0) - amount
+                                            # ON NE TOUCHE PLUS AU TOTAL DEPOSE LORS D'UN RETRAIT
                                             save_state(state)
                                             send_telegram_message(f"✅ Retrait de <b>{amount:.2f} $</b> effectué !\n\n" + build_stats_message(state), get_main_keyboard())
                                     else:
