@@ -127,32 +127,34 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                                     if amount <= 0: raise ValueError
                                     
                                     if action == "deposit":
-                                        pending_actions[chat_id]["amount"] = amount
+                                        pending_actions[chat_id]["amount"] = amount # On garde le montant !
                                         confirm_kb = {"inline_keyboard": [[{"text": "✅ Confirmer", "callback_data": f"confirm_{action}"}], [{"text": "❌ Annuler", "callback_data": "cancel_action"}]]}
                                         send_telegram_message(f"💰 Tu souhaites déposer <b>{amount:.2f} $</b>.\nConfirmes-tu ?", confirm_kb)
                                     elif action == "withdraw":
                                         if amount > state["capital_usd"]:
                                             send_telegram_message(f"❌ Fonds insuffisants. Ton capital de trading est de <b>{state['capital_usd']:.2f} $</b>.", get_main_keyboard())
+                                            del pending_actions[chat_id] # On annule l'action
                                         else:
-                                            pending_actions[chat_id]["amount"] = amount
+                                            pending_actions[chat_id]["amount"] = amount # On garde le montant !
                                             confirm_kb = {"inline_keyboard": [[{"text": "✅ Confirmer", "callback_data": f"confirm_{action}"}], [{"text": "❌ Annuler", "callback_data": "cancel_action"}]]}
                                             send_telegram_message(f"💸 Tu souhaites retirer <b>{amount:.2f} $</b>.\nConfirmes-tu ?", confirm_kb)
                                 except ValueError:
                                     send_telegram_message("❌ Montant invalide. Envoie un nombre positif (ex: 50).", get_main_keyboard())
-                                del pending_actions[chat_id]
+                                    del pending_actions[chat_id] # On annule l'action
 
                         elif "callback_query" in update:
                             callback = update["callback_query"]
                             chat_id = callback["message"]["chat"]["id"]
                             data_cb = callback["data"]
-                            pending_actions.pop(chat_id, None)
                             
                             try:
                                 if data_cb == "stats":
                                     send_telegram_message(build_stats_message(state, config), get_main_keyboard())
                                 elif data_cb == "back_menu":
+                                    pending_actions.pop(chat_id, None)
                                     send_telegram_message("🤖 <b>Menu Principal</b>", get_main_keyboard())
                                 elif data_cb == "manage_wallets":
+                                    pending_actions.pop(chat_id, None)
                                     msg, kb = show_wallet_manager(chat_id)
                                     send_telegram_message(msg, kb)
                                 elif data_cb.startswith("create_"):
@@ -176,12 +178,12 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                                     send_telegram_message(msg, kb)
                                 elif data_cb == "deposit":
                                     pending_actions[chat_id] = {"action": "deposit", "amount": 0}
-                                    # NOUVEAU MESSAGE CLAIR
                                     send_telegram_message("💰 <b>Dépôt</b>\nQuel montant en <b>$</b> souhaites-tu déposer ?\n(Envoie un nombre, ex: 50)", None)
                                 elif data_cb == "withdraw":
                                     pending_actions[chat_id] = {"action": "withdraw", "amount": 0}
-                                    # NOUVEAU MESSAGE CLAIR
                                     send_telegram_message("💸 <b>Retrait</b>\nQuel montant en <b>$</b> souhaites-tu retirer ?\n(Envoie un nombre, ex: 20)", None)
+                                
+                                # --- C'EST ICI QUE LE BUG ETAIT CORRIGE ---
                                 elif data_cb.startswith("confirm_"):
                                     action = data_cb.replace("confirm_", "")
                                     if chat_id in pending_actions and pending_actions[chat_id].get("amount", 0) > 0:
@@ -193,12 +195,19 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                                             state["capital_usd"] -= amount
                                             send_telegram_message(f"✅ Retrait de <b>{amount:.2f} $</b> effectué !", get_main_keyboard())
                                         save_state(state)
-                                    pending_actions.pop(chat_id, None)
+                                    else:
+                                        send_telegram_message("❌ Aucune opération en attente.", get_main_keyboard())
+                                    pending_actions.pop(chat_id, None) # On nettoie une fois terminé
+                                
                                 elif data_cb == "cancel_action":
                                     pending_actions.pop(chat_id, None)
-                                    send_telegram_message("❌ Annulé.", get_main_keyboard())
+                                    send_telegram_message("❌ Opération annulée.", get_main_keyboard())
+                                
+                                elif data_cb == "price":
+                                    if price_history:
+                                        send_telegram_message(f"💹 Prix : <b>{price_history[-1]:.3f} $</b>", get_main_keyboard())
                             except Exception as e:
-                                send_telegram_message(f"❌ Erreur : {e}", get_main_keyboard())
+                                send_telegram_message(f"❌ Erreur de traitement : {e}", get_main_keyboard())
                             finally:
                                 try:
                                     urllib.request.urlopen(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery?callback_query_id={callback['id']}")
