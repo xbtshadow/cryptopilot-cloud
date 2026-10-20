@@ -7,8 +7,14 @@ import os
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import redis
-from eth_account import Account
 from security import check_token_security
+
+# --- GESTION DES ERREURS D'IMPORTATION ---
+try:
+    from eth_account import Account
+except ImportError:
+    Account = None
+    print("⚠️ ATTENTION: eth-account n'est pas installé !")
 
 # --- CONNEXION REDIS ---
 REDIS_URL = os.getenv("REDIS_URL")
@@ -20,6 +26,8 @@ if REDIS_URL:
         print("✅ Connecté à la base de données Redis !")
     except Exception as e:
         print(f"⚠️ Impossible de se connecter à Redis : {e}")
+else:
+    print("⚠️ ATTENTION: La variable REDIS_URL est manquante sur Render !")
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -51,35 +59,39 @@ def get_main_keyboard():
         ]
     }
 
-# --- GESTION DES WALLETS ---
+# --- GESTION DES WALLETS AVEC GESTION D'ERREUR ---
 def generate_wallet(chat_id):
-    # Clé Redis pour compter les wallets de cet utilisateur
-    count_key = f"wallet_count:{chat_id}"
-    count = r.get(count_key)
-    count = int(count) if count else 0
+    if not r:
+        return "❌ Erreur : La base de données (Redis) n'est pas connectée. Vérifie tes variables d'environnement sur Render."
+    if not Account:
+        return "❌ Erreur : La librairie `eth-account` n'est pas installée. Ajoute-la dans `requirements.txt` sur GitHub et redémarre."
+    
+    try:
+        count_key = f"wallet_count:{chat_id}"
+        count = r.get(count_key)
+        count = int(count) if count else 0
 
-    if count >= 2:
-        return "❌ Tu as atteint la limite maximale de 2 portefeuilles par compte."
+        if count >= 2:
+            return "❌ Tu as atteint la limite maximale de 2 portefeuilles par compte."
 
-    # Génération du wallet
-    acct = Account.create()
-    address = acct.address
-    private_key = acct.key.hex()
+        acct = Account.create()
+        address = acct.address
+        private_key = acct.key.hex()
 
-    # Sauvegarde sécurisée dans Redis
-    wallet_data = {
-        "address": address,
-        "private_key": private_key
-    }
-    # On sauvegarde sous la forme wallet:chat_id:1 ou wallet:chat_id:2
-    wallet_key = f"wallet:{chat_id}:{count + 1}"
-    r.set(wallet_key, json.dumps(wallet_data))
-    r.incr(count_key)
+        wallet_data = {
+            "address": address,
+            "private_key": private_key
+        }
+        wallet_key = f"wallet:{chat_id}:{count + 1}"
+        r.set(wallet_key, json.dumps(wallet_data))
+        r.incr(count_key)
 
-    return (f"✅ <b>Nouveau Wallet Généré !</b>\n\n"
-            f"📍 Adresse publique :\n<code>{address}</code>\n\n"
-            f"🔒 <i>La clé privée a été générée et stockée de manière sécurisée dans la base de données. Elle ne sera jamais affichée ici pour ta sécurité.</i>\n"
-            f"<b>Compte {count + 1}/2</b>")
+        return (f"✅ <b>Nouveau Wallet Généré !</b>\n\n"
+                f"📍 Adresse publique :\n<code>{address}</code>\n\n"
+                f"🔒 <i>La clé privée a été générée et stockée de manière sécurisée dans la base de données.</i>\n"
+                f"<b>Compte {count + 1}/2</b>")
+    except Exception as e:
+        return f"❌ Erreur lors de la génération du wallet : {str(e)}"
 
 def listen_telegram_commands(state, config, price_history, pending_actions):
     last_update_id = 0
@@ -110,7 +122,6 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                                 if price_history:
                                     send_telegram_message(f"💹 Prix : <b>{price_history[-1]:.3f} $</b>", get_main_keyboard())
                             elif chat_id in pending_actions:
-                                # (Logique de dépôt/retrait inchangée)
                                 action = pending_actions[chat_id]["action"]
                                 try:
                                     amount = float(text.replace(",", "."))
@@ -137,40 +148,50 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                             chat_id = callback["message"]["chat"]["id"]
                             data_cb = callback["data"]
                             
-                            if data_cb == "stats":
-                                send_telegram_message(build_stats_message(state, config), get_main_keyboard())
-                            elif data_cb == "wallet":
-                                msg = generate_wallet(chat_id)
-                                send_telegram_message(msg, get_main_keyboard())
-                            elif data_cb == "price":
-                                if price_history:
-                                    send_telegram_message(f"💹 Prix : <b>{price_history[-1]:.3f} $</b>", get_main_keyboard())
-                            elif data_cb == "deposit":
-                                pending_actions[chat_id] = {"action": "deposit", "amount": 0}
-                                send_telegram_message("💰 <b>Dépôt</b>\nCombien ? (Envoie un nombre)", None)
-                            elif data_cb == "withdraw":
-                                pending_actions[chat_id] = {"action": "withdraw", "amount": 0}
-                                send_telegram_message("💸 <b>Retrait</b>\nCombien ? (Envoie un nombre)", None)
-                            elif data_cb.startswith("confirm_"):
-                                action = data_cb.replace("confirm_", "")
-                                if chat_id in pending_actions and pending_actions[chat_id].get("amount", 0) > 0:
-                                    amount = pending_actions[chat_id]["amount"]
-                                    if action == "deposit":
-                                        state["capital_usd"] += amount
-                                        send_telegram_message(f"✅ Dépôt de <b>{amount:.2f} $</b> effectué !", get_main_keyboard())
-                                    elif action == "withdraw":
-                                        state["capital_usd"] -= amount
-                                        send_telegram_message(f"✅ Retrait de <b>{amount:.2f} $</b> effectué !", get_main_keyboard())
-                                    save_state(state)
-                                pending_actions.pop(chat_id, None)
-                            elif data_cb == "cancel_action":
-                                pending_actions.pop(chat_id, None)
-                                send_telegram_message("❌ Opération annulée.", get_main_keyboard())
-                                
-                            urllib.request.urlopen(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery?callback_query_id={callback['id']}")
+                            # On nettoie l'action en cours si on clique sur un bouton
+                            pending_actions.pop(chat_id, None)
+                            
+                            try:
+                                if data_cb == "stats":
+                                    send_telegram_message(build_stats_message(state, config), get_main_keyboard())
+                                elif data_cb == "wallet":
+                                    msg = generate_wallet(chat_id)
+                                    send_telegram_message(msg, get_main_keyboard())
+                                elif data_cb == "price":
+                                    if price_history:
+                                        send_telegram_message(f"💹 Prix : <b>{price_history[-1]:.3f} $</b>", get_main_keyboard())
+                                elif data_cb == "deposit":
+                                    pending_actions[chat_id] = {"action": "deposit", "amount": 0}
+                                    send_telegram_message("💰 <b>Dépôt</b>\nCombien ? (Envoie un nombre)", None)
+                                elif data_cb == "withdraw":
+                                    pending_actions[chat_id] = {"action": "withdraw", "amount": 0}
+                                    send_telegram_message("💸 <b>Retrait</b>\nCombien ? (Envoie un nombre)", None)
+                                elif data_cb.startswith("confirm_"):
+                                    action = data_cb.replace("confirm_", "")
+                                    if chat_id in pending_actions and pending_actions[chat_id].get("amount", 0) > 0:
+                                        amount = pending_actions[chat_id]["amount"]
+                                        if action == "deposit":
+                                            state["capital_usd"] += amount
+                                            send_telegram_message(f"✅ Dépôt de <b>{amount:.2f} $</b> effectué !", get_main_keyboard())
+                                        elif action == "withdraw":
+                                            state["capital_usd"] -= amount
+                                            send_telegram_message(f"✅ Retrait de <b>{amount:.2f} $</b> effectué !", get_main_keyboard())
+                                        save_state(state)
+                                    pending_actions.pop(chat_id, None)
+                                elif data_cb == "cancel_action":
+                                    pending_actions.pop(chat_id, None)
+                                    send_telegram_message("❌ Opération annulée.", get_main_keyboard())
+                            except Exception as e:
+                                send_telegram_message(f"❌ Erreur de traitement : {e}", get_main_keyboard())
+                            finally:
+                                # Toujours répondre à Telegram pour arrêter le chargement du bouton
+                                try:
+                                    urllib.request.urlopen(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery?callback_query_id={callback['id']}")
+                                except:
+                                    pass
 
         except Exception as e:
-            print(f"Erreur Telegram : {e}")
+            print(f"Erreur Telegram listener : {e}")
         time.sleep(1)
 
 def build_stats_message(state, config):
@@ -198,7 +219,7 @@ def load_config(path="config.json"):
             "trailing_stop_percent": 2.0, "ema_fast": 5, "ema_slow": 15,
             "rsi_period": 10, "estimated_gas_cost_usd": 0.15,
             "estimated_trading_fee_percent": 0.25, "estimated_slippage_percent": 0.5,
-            "pair": "CAKE_USDT", "token_address": "0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82"
+            "pair": "CAKE/USDT" # On utilise le nom exact pour l'API
         }
 
 def load_state(config):
@@ -236,15 +257,29 @@ def save_history(history):
         try: r.set("cryptopilot_history", json.dumps(history[-100:]))
         except Exception: pass
 
-def get_real_price(pair_symbol):
-    search_query = pair_symbol.replace("_", "/")
-    url = f"https://api.dexscreener.com/latest/dex/search?q={search_query}"
+# --- CORRECTION DU PRIX : Recherche fiable sur PancakeSwap ---
+def get_real_price(pair_name):
+    # On utilise l'API de recherche avec le nom
+    url = f"https://api.dexscreener.com/latest/dex/search?q={pair_name}"
     try:
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req, timeout=10) as response:
             data = json.loads(response.read().decode())
-            if data.get("pairs"): return float(data["pairs"][0]["priceUsd"])
-    except Exception: pass
+            if data.get("pairs"):
+                # On filtre pour trouver la paire sur PancakeSwap avec la plus grosse liquidité
+                best_pair = None
+                max_liquidity = 0
+                for p in data["pairs"]:
+                    if p.get("dexId") == "pancakeswap":
+                        liq = float(p.get("liquidity", {}).get("usd", 0))
+                        if liq > max_liquidity:
+                            max_liquidity = liq
+                            best_pair = p
+                
+                if best_pair:
+                    return float(best_pair["priceUsd"])
+    except Exception as e:
+        print(f"Erreur prix: {e}")
     return None
 
 def calculate_ema(prices, period):
@@ -268,7 +303,7 @@ def calculate_rsi(prices, period=14):
     return 100 - (100 / (1 + rs))
 
 def simulate_buy(state, price, config):
-    token_address = config.get("token_address") 
+    token_address = "0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82" 
     try:
         security_check = check_token_security(token_address)
         if not security_check["safe"]: 
@@ -290,7 +325,7 @@ def simulate_buy(state, price, config):
     state["entry_price"] = price
     state["highest_price"] = price
     state["total_fees_usd"] += gas + fee
-    send_telegram_message(f"🚀 ACHAT !\nPrix : {price:.2f} $\nMontant : {amount_usd:.2f} $")
+    send_telegram_message(f"🚀 ACHAT !\nPrix : {price:.3f} $\nMontant : {amount_usd:.2f} $")
     return state
 
 def simulate_sell(state, price, config, reason="Signal"):
@@ -318,7 +353,7 @@ def simulate_sell(state, price, config, reason="Signal"):
         state["safe_capital_usd"] += secure_amount
 
     emoji = "💰" if pnl > 0 else "🛑"
-    send_telegram_message(f"{emoji} VENTE ({reason}) !\nPrix : {price:.2f} $\nPnL Net : {pnl:+.4f} $")
+    send_telegram_message(f"{emoji} VENTE ({reason}) !\nPrix : {price:.3f} $\nPnL Net : {pnl:+.4f} $")
     return state
 
 class WebHandler(BaseHTTPRequestHandler):
@@ -351,7 +386,7 @@ def main():
 
     while True:
         try:
-            current_price = get_real_price(config["pair"])
+            current_price = get_real_price(config.get("pair", "CAKE/USDT"))
             if current_price:
                 price_history.append(current_price)
                 if len(price_history) > 100: price_history.pop(0)
