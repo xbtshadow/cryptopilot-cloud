@@ -101,21 +101,23 @@ def show_wallet_manager(chat_id):
     buttons.append([{"text": "⬅️ Retour", "callback_data": "back_menu"}])
     return msg, {"inline_keyboard": buttons}
 
-# --- MARCHÉ (RETOUR À L'API BINANCE QUI FONCTIONNAIT) ---
+# --- MARCHÉ (RETOUR À L'API COINMARKETCAP) ---
 def get_market_prices():
-    msg = "🌐 <b>PRIX DU MARCHÉ</b> 🌐\n\n"
-    url = 'https://api.binance.com/api/v3/ticker/price?symbols=["BNBUSDT","ETHUSDT","BTCUSDT"]'
+    msg = "🌐 <b>PRIX DU MARCHÉ (CoinMarketCap)</b> 🌐\n\n"
+    url = "https://pro-api.coinmarketcap.com/public-api/v1/cryptocurrency/listings/latest?limit=20&convert=USD"
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json'})
         with urllib.request.urlopen(req, timeout=10) as response:
             data = json.loads(response.read().decode())
-            for item in data:
-                sym = item["symbol"].replace("USDT", "")
-                price = float(item["price"])
-                msg += f"💎 <b>{sym}</b> : {price:,.2f} $\n"
+            for coin in data.get("data", []):
+                sym = coin.get("symbol")
+                if sym in ["BNB", "ETH", "BTC"]:
+                    price = coin.get("quote", {}).get("USD", {}).get("price")
+                    if price is not None:
+                        msg += f"💎 <b>{sym}</b> : {price:,.2f} $\n"
             return msg
-    except Exception:
-        return "❌ Impossible de récupérer les prix (API Binance temporairement indisponible)."
+    except Exception as e:
+        return "❌ Impossible de récupérer les prix (API CoinMarketCap temporairement indisponible)."
 
 # --- COMMANDES TELEGRAM ---
 def listen_telegram_commands(state, config, price_history, pending_actions):
