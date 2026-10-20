@@ -93,32 +93,29 @@ def show_wallet_manager(chat_id):
     buttons.append([{"text": "⬅️ Retour", "callback_data": "back_menu"}])
     return msg, {"inline_keyboard": buttons}
 
-# --- MARCHÉ (CORRIGÉ AVEC DEXSCREENER) ---
+# --- MARCHÉ (RETRAIT DE SOL) ---
 def get_market_prices():
-    # Adresses des tokens sur la BSC
-    addresses = {
-        "BNB": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
-        "ETH": "0x2170Ed0880ac9A755fd29B2688956BD959F933F8",
-        "BTC": "0x7130d2A12B9BCbFAe4f2634d864A1Ee1Ce3Ead9c",
-        "SOL": "0x570A5D26f7765Ecb712C0924E4De2B65A5d4d5B5" # Wrapped SOL sur BSC
-    }
     msg = "🌐 <b>PRIX DU MARCHÉ (BSC)</b> 🌐\n\n"
-    try:
-        for sym, address in addresses.items():
-            url = f"https://api.dexscreener.com/latest/dex/tokens/{address}"
+    # On ne garde que les paires EVM natives sur BSC
+    searches = {"BNB": "BNB/USDT", "ETH": "ETH/USDT", "BTC": "BTC/USDT"}
+    
+    for sym, query in searches.items():
+        try:
+            url = f"https://api.dexscreener.com/latest/dex/search?q={query}"
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
             with urllib.request.urlopen(req, timeout=5) as response:
                 data = json.loads(response.read().decode())
                 if data.get("pairs"):
-                    # On prend la paire avec le plus de liquidité
-                    best_pair = max(data["pairs"], key=lambda x: float(x.get("liquidity", {}).get("usd", 0) or 0))
-                    price = float(best_pair["priceUsd"])
-                    msg += f"💎 <b>{sym}</b> : {price:,.2f} $\n"
-                else:
-                    msg += f"💎 <b>{sym}</b> : N/A\n"
-        return msg
-    except Exception as e:
-        return f"❌ Erreur lors de la récupération des prix : {e}"
+                    bsc_pairs = [p for p in data["pairs"] if p.get("chainId") == "bsc"]
+                    if bsc_pairs:
+                        best_pair = max(bsc_pairs, key=lambda x: float(x.get("liquidity", {}).get("usd", 0) or 0))
+                        price = float(best_pair["priceUsd"])
+                        msg += f"💎 <b>{sym}</b> : {price:,.2f} $\n"
+                        continue
+            msg += f"💎 <b>{sym}</b> : N/A\n"
+        except Exception:
+            msg += f"💎 <b>{sym}</b> : Erreur\n"
+    return msg
 
 # --- COMMANDES TELEGRAM ---
 def listen_telegram_commands(state, config, price_history, pending_actions):
@@ -232,7 +229,6 @@ def build_stats_message(state):
     if state.get("total_trades", 0) > 0:
         win_rate = (state.get("winning_trades", 0) / state["total_trades"]) * 100
     
-    # Indicateur Redis
     db_status = "🟢 Connecté (Sauvegardé)" if r else "🔴 Local (Risque de perte)"
     
     return (f"📊 <b>TABLEAU DE BORD</b> 📊\n"
