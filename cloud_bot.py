@@ -46,7 +46,7 @@ def send_telegram_message(message, reply_markup=None):
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         req = urllib.request.Request(url, data=encoded_payload)
         urllib.request.urlopen(req, timeout=5)
-    except Exception: pass
+    except Exception as e: print(f"Erreur envoi Telegram: {e}")
 
 def get_main_keyboard(state):
     btn_pause = "▶️ Reprendre" if state.get("is_paused", False) else "⏸️ Pause"
@@ -101,7 +101,7 @@ def show_wallet_manager(chat_id):
     buttons.append([{"text": "⬅️ Retour", "callback_data": "back_menu"}])
     return msg, {"inline_keyboard": buttons}
 
-# --- MARCHÉ (RETOUR À L'API COINMARKETCAP) ---
+# --- MARCHÉ (COINMARKETCAP) ---
 def get_market_prices():
     msg = "🌐 <b>PRIX DU MARCHÉ (CoinMarketCap)</b> 🌐\n\n"
     url = "https://pro-api.coinmarketcap.com/public-api/v1/cryptocurrency/listings/latest?limit=20&convert=USD"
@@ -116,7 +116,7 @@ def get_market_prices():
                     if price is not None:
                         msg += f"💎 <b>{sym}</b> : {price:,.2f} $\n"
             return msg
-    except Exception as e:
+    except Exception:
         return "❌ Impossible de récupérer les prix (API CoinMarketCap temporairement indisponible)."
 
 # --- COMMANDES TELEGRAM ---
@@ -183,30 +183,41 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                                             emoji = "🟢" if t['pnl'] > 0 else "🔴"
                                             msg += f"{emoji} {t['date']}\nAchat: {t['entry']:.2f}$ | Vente: {t['exit']:.2f}$\nPnL: {t['pnl']:+.2f}$\n\n"
                                     send_telegram_message(msg, get_main_keyboard(state))
+                                
+                                # --- DEBUG BLINDÉ ---
                                 elif data_cb == "debug":
-                                    price = get_real_price(config.get("pair_address", "0x16b9a82891338f9bA80E2D6970FddA79D1eb0daE"))
-                                    msg = "🛠️ <b>MODE DEBUG</b> 🛠️\n\n"
-                                    if not price:
-                                        msg += "❌ Impossible de récupérer le prix.\nL'API DexScreener est peut-être bloquée."
-                                    else:
-                                        msg += f"💹 Prix Actuel : {price:.3f} $\n"
-                                        if len(price_history) < config["ema_slow"]:
-                                            msg += f"⏳ Attente d'historique : {len(price_history)}/{config['ema_slow']} points."
+                                    try:
+                                        msg = "🛠️ <b>MODE DEBUG</b> 🛠️\n\n"
+                                        msg += f"💰 Capital : {state['capital_usd']:.2f} $\n"
+                                        msg += f"Pause : {state.get('is_paused', False)}\n"
+                                        msg += f"Trades total : {state.get('total_trades', 0)}\n"
+                                        msg += f"Historique en mémoire : {len(price_history)} points\n\n"
+                                        
+                                        price = get_real_price(config.get("pair_address", "0x16b9a82891338f9bA80E2D6970FddA79D1eb0daE"))
+                                        if not price:
+                                            msg += "❌ Impossible de récupérer le prix.\nL'API DexScreener est peut-être bloquée."
                                         else:
-                                            ema_f = calculate_ema(price_history, config["ema_fast"])
-                                            ema_s = calculate_ema(price_history, config["ema_slow"])
-                                            rsi = calculate_rsi(price_history, config["rsi_period"])
-                                            msg += f"📊 EMA5 : {ema_f:.2f}\n"
-                                            msg += f"📉 EMA15 : {ema_s:.2f}\n"
-                                            msg += f"🌡️ RSI : {rsi:.1f}\n\n"
-                                            
-                                            if ema_f > ema_s and rsi < 70:
-                                                msg += "✅ Condition d'ACHAT remplie ! Le bot va acheter au prochain cycle si le prix ne chute pas."
+                                            msg += f"💹 Prix Actuel : {price:.3f} $\n"
+                                            if len(price_history) < config["ema_slow"]:
+                                                msg += f"⏳ Attente d'historique : {len(price_history)}/{config['ema_slow']} points."
                                             else:
-                                                msg += "⏳ Condition d'ACHAT NON remplie.\n"
-                                                if ema_f <= ema_s: msg += "  - Tendance baissière (EMA5 < EMA15)\n"
-                                                if rsi >= 70: msg += "  - Marché en surchauffe (RSI > 70)\n"
-                                    send_telegram_message(msg, get_main_keyboard(state))
+                                                ema_f = calculate_ema(price_history, config["ema_fast"])
+                                                ema_s = calculate_ema(price_history, config["ema_slow"])
+                                                rsi = calculate_rsi(price_history, config["rsi_period"])
+                                                msg += f"📊 EMA5 : {ema_f:.2f}\n"
+                                                msg += f"📉 EMA15 : {ema_s:.2f}\n"
+                                                msg += f"🌡️ RSI : {rsi:.1f}\n\n"
+                                                
+                                                if ema_f > ema_s and rsi < 70:
+                                                    msg += "✅ Condition d'ACHAT remplie !"
+                                                else:
+                                                    msg += "⏳ Condition d'ACHAT NON remplie.\n"
+                                                    if ema_f <= ema_s: msg += "  - Tendance baissière (EMA5 < EMA15)\n"
+                                                    if rsi >= 70: msg += "  - Marché en surchauffe (RSI > 70)\n"
+                                        send_telegram_message(msg, get_main_keyboard(state))
+                                    except Exception as e:
+                                        send_telegram_message(f"❌ Erreur dans le Debug : {e}", get_main_keyboard(state))
+
                                 elif data_cb == "market":
                                     send_telegram_message(get_market_prices(), get_main_keyboard(state))
                                 elif data_cb == "back_menu":
@@ -265,11 +276,12 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                                     pending_actions.pop(chat_id, None)
                                     send_telegram_message("❌ Annulé.", get_main_keyboard(state))
                             except Exception as e:
-                                send_telegram_message(f"❌ Erreur : {e}", get_main_keyboard(state))
+                                send_telegram_message(f"❌ Erreur Callback : {e}", get_main_keyboard(state))
                             finally:
                                 try: urllib.request.urlopen(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery?callback_query_id={callback['id']}")
                                 except: pass
-        except Exception: pass
+        except Exception as e: 
+            print(f"Erreur boucle Telegram : {e}")
         time.sleep(2)
 
 def build_stats_message(state):
