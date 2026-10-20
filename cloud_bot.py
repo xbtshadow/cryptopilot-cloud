@@ -6,22 +6,82 @@ import urllib.parse
 import os
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import redis
+from eth_account import Account
 from security import check_token_security
+
+# --- CONNEXION REDIS ---
+REDIS_URL = os.getenv("REDIS_URL")
+r = None
+if REDIS_URL:
+    try:
+        r = redis.from_url(REDIS_URL, decode_responses=True)
+        r.ping()
+        print("✅ Connecté à la base de données Redis !")
+    except Exception as e:
+        print(f"⚠️ Impossible de se connecter à Redis : {e}")
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
-def send_telegram_message(message):
+def send_telegram_message(message, reply_markup=None):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return 
     try:
-        encoded_message = urllib.parse.quote_plus(message)
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage?chat_id={TELEGRAM_CHAT_ID}&text={encoded_message}"
-        urllib.request.urlopen(url, timeout=5)
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": message,
+            "parse_mode": "HTML"
+        }
+        if reply_markup:
+            payload["reply_markup"] = json.dumps(reply_markup)
+        
+        encoded_payload = urllib.parse.urlencode(payload).encode('utf-8')
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        req = urllib.request.Request(url, data=encoded_payload)
+        urllib.request.urlopen(req, timeout=5)
     except Exception as e:
         print(f"⚠️ Erreur Telegram : {e}")
 
-# --- NOUVELLE FONCTION : ÉCOUTER TES COMMANDES TELEGRAM ---
-def listen_telegram_commands(state, config):
+def get_main_keyboard():
+    return {
+        "inline_keyboard": [
+            [{"text": "📊 Statistiques", "callback_data": "stats"}],
+            [{"text": "💰 Déposer", "callback_data": "deposit"}, {"text": "💸 Retirer", "callback_data": "withdraw"}],
+            [{"text": "🔑 Mes Wallets", "callback_data": "wallet"}, {"text": "💹 Prix Actuel", "callback_data": "price"}]
+        ]
+    }
+
+# --- GESTION DES WALLETS ---
+def generate_wallet(chat_id):
+    # Clé Redis pour compter les wallets de cet utilisateur
+    count_key = f"wallet_count:{chat_id}"
+    count = r.get(count_key)
+    count = int(count) if count else 0
+
+    if count >= 2:
+        return "❌ Tu as atteint la limite maximale de 2 portefeuilles par compte."
+
+    # Génération du wallet
+    acct = Account.create()
+    address = acct.address
+    private_key = acct.key.hex()
+
+    # Sauvegarde sécurisée dans Redis
+    wallet_data = {
+        "address": address,
+        "private_key": private_key
+    }
+    # On sauvegarde sous la forme wallet:chat_id:1 ou wallet:chat_id:2
+    wallet_key = f"wallet:{chat_id}:{count + 1}"
+    r.set(wallet_key, json.dumps(wallet_data))
+    r.incr(count_key)
+
+    return (f"✅ <b>Nouveau Wallet Généré !</b>\n\n"
+            f"📍 Adresse publique :\n<code>{address}</code>\n\n"
+            f"🔒 <i>La clé privée a été générée et stockée de manière sécurisée dans la base de données. Elle ne sera jamais affichée ici pour ta sécurité.</i>\n"
+            f"<b>Compte {count + 1}/2</b>")
+
+def listen_telegram_commands(state, config, price_history, pending_actions):
     last_update_id = 0
     while True:
         try:
@@ -32,49 +92,99 @@ def listen_telegram_commands(state, config):
                 if data.get("result"):
                     for update in data["result"]:
                         last_update_id = update["update_id"] + 1
+                        
+                        # Gestion des messages texte
                         if "message" in update and "text" in update["message"]:
                             text = update["message"]["text"]
-                            if text == "/stats" or text == "/pnl":
-                                # Construction du message de stats
-                                trade_cap = state["capital_usd"]
-                                safe_cap = state["safe_capital_usd"]
-                                total_cap = trade_cap + safe_cap
-                                
-                                if state["position_open"]:
-                                    pos_status = f"OUI (Acheté à {state['entry_price']:.2f} $)"
-                                else:
-                                    pos_status = "NON"
+                            chat_id = update["message"]["chat"]["id"]
+                            if str(chat_id) != str(TELEGRAM_CHAT_ID): continue
+                            
+                            if text in ["/start", "/menu"]:
+                                send_telegram_message("🤖 <b>Bienvenue sur CryptoPilot BSC</b>\nChoisis une option :", get_main_keyboard())
+                            elif text == "/wallet":
+                                msg = generate_wallet(chat_id)
+                                send_telegram_message(msg, get_main_keyboard())
+                            elif text == "/stats":
+                                send_telegram_message(build_stats_message(state, config), get_main_keyboard())
+                            elif text == "/price":
+                                if price_history:
+                                    send_telegram_message(f"💹 Prix : <b>{price_history[-1]:.3f} $</b>", get_main_keyboard())
+                            elif chat_id in pending_actions:
+                                # (Logique de dépôt/retrait inchangée)
+                                action = pending_actions[chat_id]["action"]
+                                try:
+                                    amount = float(text.replace(",", "."))
+                                    if amount <= 0: raise ValueError
                                     
-                                msg = (f"📊 TABLEAU DE BORD 📊\n"
-                                       f"💰 Capital Trading : {trade_cap:.2f} $\n"
-                                       f"🔒 Coffre-fort : {safe_cap:.2f} $\n"
-                                       f"💎 Total : {total_cap:.2f} $\n"
-                                       f"📈 Position Ouverte : {pos_status}\n"
-                                       f"💵 PnL Réalisé : {state['realized_pnl_usd']:+.4f} $\n"
-                                       f"💸 Frais payés : {state['total_fees_usd']:.4f} $")
-                                send_telegram_message(msg)
-        except Exception:
-            pass
-        time.sleep(2)
+                                    if action == "deposit":
+                                        pending_actions[chat_id]["amount"] = amount
+                                        confirm_kb = {"inline_keyboard": [[{"text": "✅ Confirmer", "callback_data": f"confirm_{action}"}], [{"text": "❌ Annuler", "callback_data": "cancel_action"}]]}
+                                        send_telegram_message(f"💰 Déposer <b>{amount:.2f} $</b> ?", confirm_kb)
+                                    elif action == "withdraw":
+                                        if amount > state["capital_usd"]:
+                                            send_telegram_message(f"❌ Fonds insuffisants. Capital : <b>{state['capital_usd']:.2f} $</b>.", get_main_keyboard())
+                                        else:
+                                            pending_actions[chat_id]["amount"] = amount
+                                            confirm_kb = {"inline_keyboard": [[{"text": "✅ Confirmer", "callback_data": f"confirm_{action}"}], [{"text": "❌ Annuler", "callback_data": "cancel_action"}]]}
+                                            send_telegram_message(f"💸 Retirer <b>{amount:.2f} $</b> ?", confirm_kb)
+                                except ValueError:
+                                    send_telegram_message("❌ Montant invalide.", get_main_keyboard())
+                                del pending_actions[chat_id]
 
-# --- MINI SERVEUR WEB POUR UPTIMEROBOT ---
-class WebHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header('Content-type', 'text/plain')
-        self.end_headers()
-        self.wfile.write(b"Bot is alive")
-    def do_HEAD(self):
-        self.send_response(200)
-        self.send_header('Content-type', 'text/plain')
-        self.end_headers()
+                        # Gestion des clics sur les boutons
+                        elif "callback_query" in update:
+                            callback = update["callback_query"]
+                            chat_id = callback["message"]["chat"]["id"]
+                            data_cb = callback["data"]
+                            
+                            if data_cb == "stats":
+                                send_telegram_message(build_stats_message(state, config), get_main_keyboard())
+                            elif data_cb == "wallet":
+                                msg = generate_wallet(chat_id)
+                                send_telegram_message(msg, get_main_keyboard())
+                            elif data_cb == "price":
+                                if price_history:
+                                    send_telegram_message(f"💹 Prix : <b>{price_history[-1]:.3f} $</b>", get_main_keyboard())
+                            elif data_cb == "deposit":
+                                pending_actions[chat_id] = {"action": "deposit", "amount": 0}
+                                send_telegram_message("💰 <b>Dépôt</b>\nCombien ? (Envoie un nombre)", None)
+                            elif data_cb == "withdraw":
+                                pending_actions[chat_id] = {"action": "withdraw", "amount": 0}
+                                send_telegram_message("💸 <b>Retrait</b>\nCombien ? (Envoie un nombre)", None)
+                            elif data_cb.startswith("confirm_"):
+                                action = data_cb.replace("confirm_", "")
+                                if chat_id in pending_actions and pending_actions[chat_id].get("amount", 0) > 0:
+                                    amount = pending_actions[chat_id]["amount"]
+                                    if action == "deposit":
+                                        state["capital_usd"] += amount
+                                        send_telegram_message(f"✅ Dépôt de <b>{amount:.2f} $</b> effectué !", get_main_keyboard())
+                                    elif action == "withdraw":
+                                        state["capital_usd"] -= amount
+                                        send_telegram_message(f"✅ Retrait de <b>{amount:.2f} $</b> effectué !", get_main_keyboard())
+                                    save_state(state)
+                                pending_actions.pop(chat_id, None)
+                            elif data_cb == "cancel_action":
+                                pending_actions.pop(chat_id, None)
+                                send_telegram_message("❌ Opération annulée.", get_main_keyboard())
+                                
+                            urllib.request.urlopen(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery?callback_query_id={callback['id']}")
 
-def run_web_server():
-    port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(('0.0.0.0', port), WebHandler)
-    server.serve_forever()
+        except Exception as e:
+            print(f"Erreur Telegram : {e}")
+        time.sleep(1)
 
-# --- LE RESTE DE TON CODE ---
+def build_stats_message(state, config):
+    total = state["capital_usd"] + state["safe_capital_usd"]
+    pos = "OUI" if state["position_open"] else "NON"
+    return (f"📊 <b>TABLEAU DE BORD</b> 📊\n"
+            f"💰 Capital Trading : <b>{state['capital_usd']:.2f} $</b>\n"
+            f"🔒 Coffre-fort : <b>{state['safe_capital_usd']:.2f} $</b>\n"
+            f"💎 Total : <b>{total:.2f} $</b>\n"
+            f"📈 Position Ouverte : {pos}\n"
+            f"💵 PnL Réalisé : {state['realized_pnl_usd']:+.4f} $\n"
+            f"💸 Frais payés : {state['total_fees_usd']:.4f} $")
+
+# --- GESTION DES FICHIERS ET DE LA BDD ---
 def load_config(path="config.json"):
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -84,62 +194,64 @@ def load_config(path="config.json"):
             "initial_capital_usd": 100.0, "safe_capital_percentage": 50.0,
             "profit_secure_percentage": 80.0, "position_size_percent": 60.0,
             "stop_loss_percent": 5.0, "anti_crash_drop_percent": 30.0,
-            "take_profit_percent": 10.0, "trailing_stop_activation_pct": 5.0,
+            "take_profit_percent": 15.0, "trailing_stop_activation_pct": 8.0,
             "trailing_stop_percent": 2.0, "ema_fast": 5, "ema_slow": 15,
             "rsi_period": 10, "estimated_gas_cost_usd": 0.15,
-            "estimated_trading_fee_percent": 0.25, "estimated_slippage_percent": 0.5
+            "estimated_trading_fee_percent": 0.25, "estimated_slippage_percent": 0.5,
+            "pair": "CAKE_USDT", "token_address": "0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82"
         }
 
-def load_state(path="state.json"):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        config = load_config()
-        total_capital = config.get("initial_capital_usd", 10.0)
-        safe_pct = config.get("safe_capital_percentage", 50.0)
-        safe_amount = total_capital * (safe_pct / 100.0)
-        trade_amount = total_capital - safe_amount
-        return {
-            "capital_usd": trade_amount, "safe_capital_usd": safe_amount,
-            "position_open": False, "position_amount_usd": 0.0,
-            "entry_price": 0.0, "highest_price": 0.0,
-            "total_fees_usd": 0.0, "realized_pnl_usd": 0.0
-        }
+def load_state(config):
+    if r:
+        try:
+            data = r.get("cryptopilot_state")
+            if data: return json.loads(data)
+        except Exception: pass
+    total_capital = config.get("initial_capital_usd", 100.0)
+    safe_pct = config.get("safe_capital_percentage", 50.0)
+    safe_amount = total_capital * (safe_pct / 100.0)
+    trade_amount = total_capital - safe_amount
+    return {
+        "capital_usd": trade_amount, "safe_capital_usd": safe_amount,
+        "position_open": False, "position_amount_usd": 0.0,
+        "entry_price": 0.0, "highest_price": 0.0,
+        "total_fees_usd": 0.0, "realized_pnl_usd": 0.0
+    }
 
-def save_state(state, path="state.json"):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2)
+def save_state(state):
+    if r:
+        try: r.set("cryptopilot_state", json.dumps(state))
+        except Exception: pass
 
-def load_history(path="history.json"):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return []
+def load_history():
+    if r:
+        try:
+            data = r.get("cryptopilot_history")
+            if data: return json.loads(data)
+        except Exception: pass
+    return []
 
-def save_history(history, path="history.json"):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(history, f)
+def save_history(history):
+    if r:
+        try: r.set("cryptopilot_history", json.dumps(history[-100:]))
+        except Exception: pass
 
-def get_real_price():
-    url = "https://api.dexscreener.com/latest/dex/pairs/bsc/0x16b9a82891338f9bA80E2D6970FddA79D1eb0daE"
+def get_real_price(pair_symbol):
+    search_query = pair_symbol.replace("_", "/")
+    url = f"https://api.dexscreener.com/latest/dex/search?q={search_query}"
     try:
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req, timeout=10) as response:
             data = json.loads(response.read().decode())
-            if data.get("pair"):
-                return float(data["pair"]["priceUsd"])
-    except Exception:
-        pass
+            if data.get("pairs"): return float(data["pairs"][0]["priceUsd"])
+    except Exception: pass
     return None
 
 def calculate_ema(prices, period):
     if len(prices) < period: return prices[-1]
     ema = prices[0]
     multiplier = 2 / (period + 1)
-    for price in prices[1:]:
-        ema = (ema * (1 - multiplier)) + (price * multiplier)
+    for price in prices[1:]: ema = (ema * (1 - multiplier)) + (price * multiplier)
     return ema
 
 def calculate_rsi(prices, period=14):
@@ -156,10 +268,12 @@ def calculate_rsi(prices, period=14):
     return 100 - (100 / (1 + rs))
 
 def simulate_buy(state, price, config):
-    token_address = "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c" 
+    token_address = config.get("token_address") 
     try:
         security_check = check_token_security(token_address)
-        if not security_check["safe"]: return state
+        if not security_check["safe"]: 
+            send_telegram_message(f"❌ Achat bloqué : {security_check['reason']}")
+            return state
     except Exception: return state
 
     amount_usd = state["capital_usd"] * (config["position_size_percent"] / 100.0)
@@ -176,7 +290,7 @@ def simulate_buy(state, price, config):
     state["entry_price"] = price
     state["highest_price"] = price
     state["total_fees_usd"] += gas + fee
-    send_telegram_message(f"🚀 ACHAT !\nPrix : {price:.2f} $\nMontant : {amount_usd:.2f} $\nCapital restant : {state['capital_usd']:.2f} $")
+    send_telegram_message(f"🚀 ACHAT !\nPrix : {price:.2f} $\nMontant : {amount_usd:.2f} $")
     return state
 
 def simulate_sell(state, price, config, reason="Signal"):
@@ -199,30 +313,45 @@ def simulate_sell(state, price, config, reason="Signal"):
     state["highest_price"] = 0.0
 
     if pnl > 0:
-        profit_secure_pct = config.get("profit_secure_percentage", 80.0)
-        secure_amount = pnl * (profit_secure_pct / 100.0)
+        secure_amount = pnl * (config.get("profit_secure_percentage", 80.0) / 100.0)
         state["capital_usd"] -= secure_amount
         state["safe_capital_usd"] += secure_amount
 
     emoji = "💰" if pnl > 0 else "🛑"
-    send_telegram_message(f"{emoji} VENTE ({reason}) !\nPrix : {price:.2f} $\nPnL Net : {pnl:+.4f} $\nCapital Trade : {state['capital_usd']:.2f} $\nSafe : {state['safe_capital_usd']:.2f} $")
+    send_telegram_message(f"{emoji} VENTE ({reason}) !\nPrix : {price:.2f} $\nPnL Net : {pnl:+.4f} $")
     return state
+
+class WebHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b"Bot is alive")
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(('0.0.0.0', port), WebHandler)
+    server.serve_forever()
 
 def main():
     threading.Thread(target=run_web_server, daemon=True).start()
     
     config = load_config()
-    state = load_state()
+    state = load_state(config)
     price_history = load_history()
+    pending_actions = {}
     
-    # Lancer l'écoute des commandes Telegram en arrière-plan
-    threading.Thread(target=listen_telegram_commands, args=(state, config), daemon=True).start()
+    threading.Thread(target=listen_telegram_commands, args=(state, config, price_history, pending_actions), daemon=True).start()
     
-    send_telegram_message("🤖 Le bot CryptoPilot est EN LIGNE sur le Cloud 24/7 !\nTape /stats pour voir tes performances.")
+    send_telegram_message(f"🤖 <b>Le bot CryptoPilot est EN LIGNE 24/7 !</b>\n🔒 Base de données connectée.\nTape /menu pour accéder aux commandes.")
 
     while True:
         try:
-            current_price = get_real_price()
+            current_price = get_real_price(config["pair"])
             if current_price:
                 price_history.append(current_price)
                 if len(price_history) > 100: price_history.pop(0)
@@ -238,18 +367,17 @@ def main():
                         if ema_fast > ema_slow and rsi < 70 and not is_price_falling:
                             state = simulate_buy(state, current_price, config)
                     else:
-                        if current_price > state["highest_price"]:
-                            state["highest_price"] = current_price
+                        if current_price > state["highest_price"]: state["highest_price"] = current_price
                         
                         pnl_percent = ((current_price - state["entry_price"]) / state["entry_price"]) * 100
                         drop_from_peak = ((state["highest_price"] - current_price) / state["highest_price"]) * 100
                         
-                        if pnl_percent >= config["take_profit_percent"]:
+                        if pnl_percent <= -config["anti_crash_drop_percent"]:
+                            state = simulate_sell(state, current_price, config, reason="ANTI-CRASH")
+                        elif pnl_percent >= config["take_profit_percent"]:
                             state = simulate_sell(state, current_price, config, reason="TAKE-PROFIT")
                         elif pnl_percent >= config["trailing_stop_activation_pct"] and drop_from_peak >= config["trailing_stop_percent"]:
                             state = simulate_sell(state, current_price, config, reason="TRAILING STOP")
-                        elif pnl_percent <= -config["anti_crash_drop_percent"]:
-                            state = simulate_sell(state, current_price, config, reason="ANTI-CRASH")
                         elif pnl_percent <= -config["stop_loss_percent"]:
                             state = simulate_sell(state, current_price, config, reason="STOP-LOSS")
 
