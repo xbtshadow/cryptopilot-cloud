@@ -14,10 +14,12 @@ except ImportError:
     Account = None
 
 # ==========================================
-# 🛑 STOP-LOSS ET TAKE-PROFIT
+# 🛑 PARAMÈTRES DE TRADING (Trailing Stop)
 # ==========================================
-STOP_LOSS_PERCENT = 5.0      
-TAKE_PROFIT_PERCENT = 15.0   
+STOP_LOSS_PERCENT = 5.0              # Coupe la perte à -5%
+TRAILING_STOP_ACTIVATION_PCT = 5.0   # Active le Trailing Stop à +5% de profit
+TRAILING_STOP_PERCENT = 2.0          # Vend si le prix chute de 2% par rapport au plus haut
+TAKE_PROFIT_PERCENT = 50.0           # Sécurité absolue (si le prix explose)
 
 REDIS_URL = os.getenv("REDIS_URL")
 r = None
@@ -93,10 +95,9 @@ def show_wallet_manager(chat_id):
     buttons.append([{"text": "⬅️ Retour", "callback_data": "back_menu"}])
     return msg, {"inline_keyboard": buttons}
 
-# --- MARCHÉ (RETRAIT DE SOL) ---
+# --- MARCHÉ ---
 def get_market_prices():
     msg = "🌐 <b>PRIX DU MARCHÉ (BSC)</b> 🌐\n\n"
-    # On ne garde que les paires EVM natives sur BSC
     searches = {"BNB": "BNB/USDT", "ETH": "ETH/USDT", "BTC": "BTC/USDT"}
     
     for sym, query in searches.items():
@@ -229,7 +230,7 @@ def build_stats_message(state):
     if state.get("total_trades", 0) > 0:
         win_rate = (state.get("winning_trades", 0) / state["total_trades"]) * 100
     
-    db_status = "🟢 Connecté (Sauvegardé)" if r else "🔴 Local (Risque de perte)"
+    db_status = "🟢 Connecté" if r else "🔴 Local"
     
     return (f"📊 <b>TABLEAU DE BORD</b> 📊\n"
             f"🏦 Total Déposé : <b>{state.get('total_deposited', 0.0):.2f} $</b>\n"
@@ -237,7 +238,9 @@ def build_stats_message(state):
             f"🗄️ Base de données : {db_status}\n"
             f"──────────────────\n"
             f"📈 Position Ouverte : {pos}\n"
-            f"🛑 SL : -{STOP_LOSS_PERCENT}% | 🎯 TP : +{TAKE_PROFIT_PERCENT}%\n"
+            f"🛑 SL : -{STOP_LOSS_PERCENT}%\n"
+            f"📉 Trailing Stop : Actif à +{TRAILING_STOP_ACTIVATION_PCT}% (Chute de {TRAILING_STOP_PERCENT}%)\n"
+            f"🎯 TP Max : +{TAKE_PROFIT_PERCENT}%\n"
             f"──────────────────\n"
             f"📊 Trades : {state.get('total_trades', 0)} (Réussite: {win_rate:.1f}%)\n"
             f"💵 PnL Réalisé : {state['realized_pnl_usd']:+.4f} $\n"
@@ -256,7 +259,7 @@ def load_state(config):
             data = r.get("cryptopilot_state")
             if data: return json.loads(data)
         except Exception: pass
-    return {"capital_usd": config.get("initial_capital_usd", 0.0), "total_deposited": 0.0, "position_open": False, "position_amount_usd": 0.0, "entry_price": 0.0, "total_fees_usd": 0.0, "realized_pnl_usd": 0.0, "total_trades": 0, "winning_trades": 0}
+    return {"capital_usd": config.get("initial_capital_usd", 0.0), "total_deposited": 0.0, "position_open": False, "position_amount_usd": 0.0, "entry_price": 0.0, "highest_price": 0.0, "total_fees_usd": 0.0, "realized_pnl_usd": 0.0, "total_trades": 0, "winning_trades": 0}
 
 def save_state(state):
     if r:
@@ -326,6 +329,7 @@ def simulate_buy(state, price, config):
     state["position_open"] = True
     state["position_amount_usd"] = amount_usd
     state["entry_price"] = price
+    state["highest_price"] = price  # On initialise le plus haut au prix d'achat
     state["total_fees_usd"] += gas + fee
     send_telegram_message(f"🚀 ACHAT !\nPrix : {price:.3f} $\nMontant : {amount_usd:.2f} $\nCapital restant : {state['capital_usd']:.2f} $")
     return state
@@ -347,6 +351,7 @@ def simulate_sell(state, price, config, reason="Signal"):
     state["position_open"] = False
     state["position_amount_usd"] = 0.0
     state["entry_price"] = 0.0
+    state["highest_price"] = 0.0
     
     state["total_trades"] = state.get("total_trades", 0) + 1
     if pnl > 0: state["winning_trades"] = state.get("winning_trades", 0) + 1
@@ -380,7 +385,7 @@ def main():
     
     threading.Thread(target=listen_telegram_commands, args=(state, config, price_history, pending_actions), daemon=True).start()
     
-    send_telegram_message("🤖 <b>Bot CryptoPilot en ligne</b>\nBienvenue ! Utilise /menu pour faire ton premier dépôt et lancer le trading.")
+    send_telegram_message("🤖 <b>Bot CryptoPilot en ligne</b>\nStratégie : Trailing Stop activé.\nUtilise /menu pour commencer.")
 
     while True:
         try:
@@ -401,12 +406,26 @@ def main():
                             if ema_fast > ema_slow and rsi < 70 and not is_price_falling:
                                 state = simulate_buy(state, current_price, config)
                         else:
+                            # --- LOGIQUE DE VENTE FUSIONNÉE (TRAILING STOP) ---
                             pnl_percent = ((current_price - state["entry_price"]) / state["entry_price"]) * 100
                             
-                            if pnl_percent >= TAKE_PROFIT_PERCENT:
-                                state = simulate_sell(state, current_price, config, reason=f"TAKE-PROFIT (+{TAKE_PROFIT_PERCENT}%)")
-                            elif pnl_percent <= -STOP_LOSS_PERCENT:
+                            # Mise à jour du plus haut atteint
+                            if current_price > state.get("highest_price", state["entry_price"]):
+                                state["highest_price"] = current_price
+                                
+                            drop_from_peak = ((state["highest_price"] - current_price) / state["highest_price"]) * 100
+
+                            # 1. Stop-Loss (Priorité absolue pour couper les pertes)
+                            if pnl_percent <= -STOP_LOSS_PERCENT:
                                 state = simulate_sell(state, current_price, config, reason=f"STOP-LOSS (-{STOP_LOSS_PERCENT}%)")
+                            
+                            # 2. Take-Profit Absolu (Sécurité ultime)
+                            elif pnl_percent >= TAKE_PROFIT_PERCENT:
+                                state = simulate_sell(state, current_price, config, reason=f"TAKE-PROFIT (+{TAKE_PROFIT_PERCENT}%)")
+                            
+                            # 3. Trailing Stop (S'active une fois +5% atteint)
+                            elif pnl_percent >= TRAILING_STOP_ACTIVATION_PCT and drop_from_peak >= TRAILING_STOP_PERCENT:
+                                state = simulate_sell(state, current_price, config, reason=f"TRAILING STOP (Chute de {drop_from_peak:.1f}%)")
 
                     save_state(state)
         except Exception as e: print(f"Erreur : {e}")
