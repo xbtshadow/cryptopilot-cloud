@@ -21,7 +21,7 @@ STOP_LOSS_PERCENT = 5.0
 TRAILING_STOP_ACTIVATION_PCT = 10.0  
 TRAILING_STOP_PERCENT = 2.0          
 TAKE_PROFIT_PERCENT = 50.0           
-MAX_DRAWDOWN_PERCENT = 20.0          # Protection globale (si -20% du plus haut, pause)
+MAX_DRAWDOWN_PERCENT = 20.0          
 
 REDIS_URL = os.getenv("REDIS_URL")
 r = None
@@ -34,6 +34,8 @@ if REDIS_URL:
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+
+last_error_time = 0
 
 def send_telegram_message(message, reply_markup=None):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return 
@@ -53,7 +55,7 @@ def get_main_keyboard(state):
             [{"text": "📊 Stats", "callback_data": "stats"}, {"text": "🌐 Marché", "callback_data": "market"}],
             [{"text": "💰 Déposer", "callback_data": "deposit"}, {"text": "💸 Retirer", "callback_data": "withdraw"}],
             [{"text": btn_pause, "callback_data": "toggle_pause"}, {"text": "📜 Historique", "callback_data": "history"}],
-            [{"text": "🔑 Mes Wallets", "callback_data": "manage_wallets"}]
+            [{"text": "🔑 Mes Wallets", "callback_data": "manage_wallets"}, {"text": "🛠️ Debug", "callback_data": "debug"}]
         ]
     }
 
@@ -99,28 +101,21 @@ def show_wallet_manager(chat_id):
     buttons.append([{"text": "⬅️ Retour", "callback_data": "back_menu"}])
     return msg, {"inline_keyboard": buttons}
 
-# --- MARCHÉ ---
+# --- MARCHÉ (RETOUR À L'API BINANCE QUI FONCTIONNAIT) ---
 def get_market_prices():
-    msg = "🌐 <b>PRIX DU MARCHÉ (BSC)</b> 🌐\n\n"
-    searches = {"BNB": "BNB/USDT", "ETH": "ETH/USDT", "BTC": "BTC/USDT"}
-    
-    for sym, query in searches.items():
-        try:
-            url = f"https://api.dexscreener.com/latest/dex/search?q={query}"
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=5) as response:
-                data = json.loads(response.read().decode())
-                if data.get("pairs"):
-                    bsc_pairs = [p for p in data["pairs"] if p.get("chainId") == "bsc"]
-                    if bsc_pairs:
-                        best_pair = max(bsc_pairs, key=lambda x: float(x.get("liquidity", {}).get("usd", 0) or 0))
-                        price = float(best_pair["priceUsd"])
-                        msg += f"💎 <b>{sym}</b> : {price:,.2f} $\n"
-                        continue
-            msg += f"💎 <b>{sym}</b> : N/A\n"
-        except Exception:
-            msg += f"💎 <b>{sym}</b> : Erreur\n"
-    return msg
+    msg = "🌐 <b>PRIX DU MARCHÉ</b> 🌐\n\n"
+    url = 'https://api.binance.com/api/v3/ticker/price?symbols=["BNBUSDT","ETHUSDT","BTCUSDT"]'
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode())
+            for item in data:
+                sym = item["symbol"].replace("USDT", "")
+                price = float(item["price"])
+                msg += f"💎 <b>{sym}</b> : {price:,.2f} $\n"
+            return msg
+    except Exception:
+        return "❌ Impossible de récupérer les prix (API Binance temporairement indisponible)."
 
 # --- COMMANDES TELEGRAM ---
 def listen_telegram_commands(state, config, price_history, pending_actions):
@@ -179,13 +174,36 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                                     send_telegram_message(f"Statut mis à jour : <b>{status}</b>", get_main_keyboard(state))
                                 elif data_cb == "history":
                                     hist = state.get("trade_history", [])
-                                    if not hist:
-                                        msg = "📜 Aucun trade enregistré pour le moment."
+                                    if not hist: msg = "📜 Aucun trade enregistré."
                                     else:
                                         msg = "📜 <b>5 DERNIERS TRADES</b>\n\n"
                                         for t in reversed(hist[-5:]):
                                             emoji = "🟢" if t['pnl'] > 0 else "🔴"
                                             msg += f"{emoji} {t['date']}\nAchat: {t['entry']:.2f}$ | Vente: {t['exit']:.2f}$\nPnL: {t['pnl']:+.2f}$\n\n"
+                                    send_telegram_message(msg, get_main_keyboard(state))
+                                elif data_cb == "debug":
+                                    price = get_real_price(config.get("pair_address", "0x16b9a82891338f9bA80E2D6970FddA79D1eb0daE"))
+                                    msg = "🛠️ <b>MODE DEBUG</b> 🛠️\n\n"
+                                    if not price:
+                                        msg += "❌ Impossible de récupérer le prix.\nL'API DexScreener est peut-être bloquée."
+                                    else:
+                                        msg += f"💹 Prix Actuel : {price:.3f} $\n"
+                                        if len(price_history) < config["ema_slow"]:
+                                            msg += f"⏳ Attente d'historique : {len(price_history)}/{config['ema_slow']} points."
+                                        else:
+                                            ema_f = calculate_ema(price_history, config["ema_fast"])
+                                            ema_s = calculate_ema(price_history, config["ema_slow"])
+                                            rsi = calculate_rsi(price_history, config["rsi_period"])
+                                            msg += f"📊 EMA5 : {ema_f:.2f}\n"
+                                            msg += f"📉 EMA15 : {ema_s:.2f}\n"
+                                            msg += f"🌡️ RSI : {rsi:.1f}\n\n"
+                                            
+                                            if ema_f > ema_s and rsi < 70:
+                                                msg += "✅ Condition d'ACHAT remplie ! Le bot va acheter au prochain cycle si le prix ne chute pas."
+                                            else:
+                                                msg += "⏳ Condition d'ACHAT NON remplie.\n"
+                                                if ema_f <= ema_s: msg += "  - Tendance baissière (EMA5 < EMA15)\n"
+                                                if rsi >= 70: msg += "  - Marché en surchauffe (RSI > 70)\n"
                                     send_telegram_message(msg, get_main_keyboard(state))
                                 elif data_cb == "market":
                                     send_telegram_message(get_market_prices(), get_main_keyboard(state))
@@ -201,10 +219,9 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                                     wallets = get_wallets(chat_id)
                                     if slot in wallets:
                                         pk = wallets[slot]["private_key"]
-                                        msg = f"⚠️ <b>ATTENTION</b> ⚠️\nVoici la clé privée de ton Wallet {slot}.\n\n<code>{pk}</code>\n\n<i>Ne partage JAMAIS cette clé. Elle donne un accès total à tes fonds.</i>"
+                                        msg = f"⚠️ <b>ATTENTION</b> ⚠️\nVoici la clé privée de ton Wallet {slot}.\n\n<code>{pk}</code>\n\n<i>Ne partage JAMAIS cette clé.</i>"
                                         send_telegram_message(msg, get_main_keyboard(state))
-                                    else:
-                                        send_telegram_message("❌ Wallet introuvable.", get_main_keyboard(state))
+                                    else: send_telegram_message("❌ Wallet introuvable.", get_main_keyboard(state))
                                 elif data_cb.startswith("create_"):
                                     slot = int(data_cb.split("_")[1])
                                     send_telegram_message(generate_wallet(chat_id, slot))
@@ -221,10 +238,10 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                                     send_telegram_message(msg, kb)
                                 elif data_cb == "deposit":
                                     pending_actions[chat_id] = {"action": "deposit", "amount": 0}
-                                    send_telegram_message("💰 <b>Dépôt</b>\nQuel montant en $ souhaites-tu déposer ?\n(Envoie un nombre, ex: 50)", None)
+                                    send_telegram_message("💰 <b>Dépôt</b>\nQuel montant en $ ? (ex: 50)", None)
                                 elif data_cb == "withdraw":
                                     pending_actions[chat_id] = {"action": "withdraw", "amount": 0}
-                                    send_telegram_message("💸 <b>Retrait</b>\nQuel montant en $ souhaites-tu retirer ?\n(Envoie un nombre, ex: 20)", None)
+                                    send_telegram_message("💸 <b>Retrait</b>\nQuel montant en $ ? (ex: 20)", None)
                                 elif data_cb.startswith("confirm_"):
                                     action = data_cb.replace("confirm_", "")
                                     if chat_id in pending_actions and pending_actions[chat_id].get("amount", 0) > 0:
@@ -341,10 +358,15 @@ def calculate_rsi(prices, period=14):
     return 100 - (100 / (1 + rs))
 
 def simulate_buy(state, price, config):
+    global last_error_time
     if state["capital_usd"] < 1.0: return state
     try:
         security_check = check_token_security("0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c") # WBNB
-        if not security_check["safe"]: return state
+        if not security_check["safe"]: 
+            if time.time() - last_error_time > 3600:
+                send_telegram_message(f"❌ Achat bloqué par le bouclier de sécurité : {security_check['reason']}")
+                last_error_time = time.time()
+            return state
     except Exception: return state
 
     amount_usd = state["capital_usd"] * (config["position_size_percent"] / 100.0)
@@ -383,7 +405,6 @@ def simulate_sell(state, price, config, reason="Signal"):
     state["entry_price"] = 0.0
     state["highest_price"] = 0.0
     
-    # Historique et Stats
     state["total_trades"] = state.get("total_trades", 0) + 1
     if pnl > 0: state["winning_trades"] = state.get("winning_trades", 0) + 1
     
@@ -460,7 +481,6 @@ def main():
                             elif pnl_percent >= TRAILING_STOP_ACTIVATION_PCT and drop_from_peak >= TRAILING_STOP_PERCENT:
                                 state = simulate_sell(state, current_price, config, reason=f"TRAILING STOP (Chute de {drop_from_peak:.1f}%)")
 
-                    # --- PROTECTION DU CAPITAL (DRAWDOWN) ---
                     if state["capital_usd"] > state.get("peak_capital", 0):
                         state["peak_capital"] = state["capital_usd"]
                     
