@@ -93,22 +93,32 @@ def show_wallet_manager(chat_id):
     buttons.append([{"text": "⬅️ Retour", "callback_data": "back_menu"}])
     return msg, {"inline_keyboard": buttons}
 
-# --- MARCHÉ (CORRIGÉ AVEC COINGECKO) ---
+# --- MARCHÉ (CORRIGÉ AVEC DEXSCREENER) ---
 def get_market_prices():
-    url = 'https://api.coingecko.com/api/v3/simple/price?ids=binancecoin,ethereum,bitcoin,solana&vs_currencies=usd'
+    # Adresses des tokens sur la BSC
+    addresses = {
+        "BNB": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
+        "ETH": "0x2170Ed0880ac9A755fd29B2688956BD959F933F8",
+        "BTC": "0x7130d2A12B9BCbFAe4f2634d864A1Ee1Ce3Ead9c",
+        "SOL": "0x570A5D26f7765Ecb712C0924E4De2B65A5d4d5B5" # Wrapped SOL sur BSC
+    }
+    msg = "🌐 <b>PRIX DU MARCHÉ (BSC)</b> 🌐\n\n"
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=10) as response:
-            data = json.loads(response.read().decode())
-            msg = "🌐 <b>PRIX DU MARCHÉ</b> 🌐\n\n"
-            symbols = {"binancecoin": "BNB", "ethereum": "ETH", "bitcoin": "BTC", "solana": "SOL"}
-            for coin_id, sym in symbols.items():
-                if coin_id in data:
-                    price = data[coin_id]['usd']
+        for sym, address in addresses.items():
+            url = f"https://api.dexscreener.com/latest/dex/tokens/{address}"
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=5) as response:
+                data = json.loads(response.read().decode())
+                if data.get("pairs"):
+                    # On prend la paire avec le plus de liquidité
+                    best_pair = max(data["pairs"], key=lambda x: float(x.get("liquidity", {}).get("usd", 0) or 0))
+                    price = float(best_pair["priceUsd"])
                     msg += f"💎 <b>{sym}</b> : {price:,.2f} $\n"
-            return msg
-    except Exception:
-        return "❌ Impossible de récupérer les prix (API temporairement indisponible)."
+                else:
+                    msg += f"💎 <b>{sym}</b> : N/A\n"
+        return msg
+    except Exception as e:
+        return f"❌ Erreur lors de la récupération des prix : {e}"
 
 # --- COMMANDES TELEGRAM ---
 def listen_telegram_commands(state, config, price_history, pending_actions):
@@ -200,7 +210,6 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                                             send_telegram_message(f"✅ Dépôt de <b>{amount:.2f} $</b> effectué !\n\n" + build_stats_message(state), get_main_keyboard())
                                         elif action == "withdraw":
                                             state["capital_usd"] -= amount
-                                            # ON NE TOUCHE PLUS AU TOTAL DEPOSE LORS D'UN RETRAIT
                                             save_state(state)
                                             send_telegram_message(f"✅ Retrait de <b>{amount:.2f} $</b> effectué !\n\n" + build_stats_message(state), get_main_keyboard())
                                     else:
@@ -222,10 +231,14 @@ def build_stats_message(state):
     win_rate = 0
     if state.get("total_trades", 0) > 0:
         win_rate = (state.get("winning_trades", 0) / state["total_trades"]) * 100
-        
+    
+    # Indicateur Redis
+    db_status = "🟢 Connecté (Sauvegardé)" if r else "🔴 Local (Risque de perte)"
+    
     return (f"📊 <b>TABLEAU DE BORD</b> 📊\n"
             f"🏦 Total Déposé : <b>{state.get('total_deposited', 0.0):.2f} $</b>\n"
             f"💰 Capital Actuel : <b>{state['capital_usd']:.2f} $</b>\n"
+            f"🗄️ Base de données : {db_status}\n"
             f"──────────────────\n"
             f"📈 Position Ouverte : {pos}\n"
             f"🛑 SL : -{STOP_LOSS_PERCENT}% | 🎯 TP : +{TAKE_PROFIT_PERCENT}%\n"
@@ -339,10 +352,8 @@ def simulate_sell(state, price, config, reason="Signal"):
     state["position_amount_usd"] = 0.0
     state["entry_price"] = 0.0
     
-    # Statistiques
     state["total_trades"] = state.get("total_trades", 0) + 1
-    if pnl > 0:
-        state["winning_trades"] = state.get("winning_trades", 0) + 1
+    if pnl > 0: state["winning_trades"] = state.get("winning_trades", 0) + 1
 
     emoji = "💰" if pnl > 0 else "🛑"
     send_telegram_message(f"{emoji} VENTE ({reason}) !\nPrix : {price:.3f} $\nPnL Net : {pnl:+.4f} $\nCapital Actuel : {state['capital_usd']:.2f} $")
