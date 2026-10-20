@@ -204,7 +204,6 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
         except Exception as e: print(f"Erreur Telegram : {e}")
         time.sleep(1)
 
-# ... (Le reste du code est identique : build_stats_message, load_config, etc.) ...
 def build_stats_message(state, config):
     total = state["capital_usd"] + state["safe_capital_usd"]
     pos = "OUI" if state["position_open"] else "NON"
