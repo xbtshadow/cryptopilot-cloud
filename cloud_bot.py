@@ -14,10 +14,10 @@ except ImportError:
     Account = None
 
 # ==========================================
-# 🛑 PARAMÈTRES DE TRADING (Trailing Stop)
+# 🛑 PARAMÈTRES DE TRADING (Ton idée)
 # ==========================================
 STOP_LOSS_PERCENT = 5.0              # Coupe la perte à -5%
-TRAILING_STOP_ACTIVATION_PCT = 5.0   # Active le Trailing Stop à +5% de profit
+TRAILING_STOP_ACTIVATION_PCT = 10.0  # Active le Trailing Stop à +10% de profit
 TRAILING_STOP_PERCENT = 2.0          # Vend si le prix chute de 2% par rapport au plus haut
 TAKE_PROFIT_PERCENT = 50.0           # Sécurité absolue (si le prix explose)
 
@@ -423,7 +423,7 @@ def main():
                             elif pnl_percent >= TAKE_PROFIT_PERCENT:
                                 state = simulate_sell(state, current_price, config, reason=f"TAKE-PROFIT (+{TAKE_PROFIT_PERCENT}%)")
                             
-                            # 3. Trailing Stop (S'active une fois +5% atteint)
+                            # 3. Trailing Stop (S'active une fois +10% atteint)
                             elif pnl_percent >= TRAILING_STOP_ACTIVATION_PCT and drop_from_peak >= TRAILING_STOP_PERCENT:
                                 state = simulate_sell(state, current_price, config, reason=f"TRAILING STOP (Chute de {drop_from_peak:.1f}%)")
 
