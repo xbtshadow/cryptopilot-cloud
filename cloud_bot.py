@@ -49,50 +49,51 @@ def get_main_keyboard():
 
 # --- GESTION DES WALLETS ---
 def get_wallets(chat_id):
-    wallets = []
+    wallets = {}
     if not r: return wallets
     try:
-        for i in range(1, 3):
-            data = r.get(f"wallet:{chat_id}:{i}")
+        for slot in [1, 2]:
+            data = r.get(f"wallet:{chat_id}:{slot}")
             if data:
-                wallets.append(json.loads(data))
+                wallets[slot] = json.loads(data)
     except Exception:
         pass
     return wallets
 
-def generate_wallet(chat_id):
+def generate_wallet(chat_id, slot):
     if not r: return "❌ Erreur : Redis non connecté."
     if not Account: return "❌ Erreur : librairie `eth-account` manquante."
     
     try:
-        count = len(get_wallets(chat_id))
-        if count >= 2: return "❌ Limite de 2 portefeuilles atteinte."
-
         acct = Account.create()
         wallet_data = {"address": acct.address, "private_key": acct.key.hex()}
-        r.set(f"wallet:{chat_id}:{count + 1}", json.dumps(wallet_data))
-        return f"✅ <b>Wallet {count + 1} généré !</b>\n📍 <code>{acct.address}</code>"
+        r.set(f"wallet:{chat_id}:{slot}", json.dumps(wallet_data))
+        return f"✅ <b>Wallet {slot} généré !</b>\n📍 <code>{acct.address}</code>"
+    except Exception as e:
+        return f"❌ Erreur : {str(e)}"
+
+def delete_wallet(chat_id, slot):
+    if not r: return "❌ Erreur : Redis non connecté."
+    try:
+        r.delete(f"wallet:{chat_id}:{slot}")
+        return f"🗑️ Le Wallet {slot} a été supprimé avec succès."
     except Exception as e:
         return f"❌ Erreur : {str(e)}"
 
 def show_wallet_manager(chat_id):
     wallets = get_wallets(chat_id)
-    
-    if not wallets:
-        msg = "🔑 <b>Gestionnaire de Wallets</b>\n\nTu n'as encore aucun portefeuille."
-        kb = {"inline_keyboard": [[{"text": "➕ Créer mon premier Wallet", "callback_data": "create_wallet"}], [{"text": "⬅️ Retour", "callback_data": "back_menu"}]]}
-        return msg, kb
-
-    msg = "🔑 <b>Tes Wallets</b>\n\n"
-    for i, w in enumerate(wallets):
-        msg += f"<b>Wallet {i+1} :</b>\n<code>{w['address']}</code>\n\n"
-    
+    msg = "🔑 <b>Gestionnaire de Wallets</b>\n\n"
     buttons = []
-    if len(wallets) < 2:
-        buttons.append([{"text": "➕ Créer un 2ème Wallet", "callback_data": "create_wallet"}])
-    else:
-        msg += "<i>(Limite de 2 portefeuilles atteinte)</i>\n"
-    
+
+    for slot in [1, 2]:
+        if slot in wallets:
+            msg += f"<b>Emplacement {slot} :</b>\n<code>{wallets[slot]['address']}</code>\n"
+            buttons.append([{"text": f"🗑️ Supprimer Wallet {slot}", "callback_data": f"delete_ask_{slot}"}])
+        else:
+            msg += f"<b>Emplacement {slot} :</b> (Vide)\n"
+            buttons.append([{"text": f"➕ Créer Wallet {slot}", "callback_data": f"create_{slot}"}])
+        msg += "\n"
+
     buttons.append([{"text": "⬅️ Retour au menu", "callback_data": "back_menu"}])
     kb = {"inline_keyboard": buttons}
     return msg, kb
@@ -119,9 +120,6 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                                 send_telegram_message("🤖 <b>Menu Principal</b>", get_main_keyboard())
                             elif text == "/stats":
                                 send_telegram_message(build_stats_message(state, config), get_main_keyboard())
-                            elif text == "/price":
-                                if price_history:
-                                    send_telegram_message(f"💹 Prix : <b>{price_history[-1]:.3f} $</b>", get_main_keyboard())
                             elif chat_id in pending_actions:
                                 action = pending_actions[chat_id]["action"]
                                 try:
@@ -157,14 +155,25 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                                 elif data_cb == "manage_wallets":
                                     msg, kb = show_wallet_manager(chat_id)
                                     send_telegram_message(msg, kb)
-                                elif data_cb == "create_wallet":
-                                    result = generate_wallet(chat_id)
+                                elif data_cb.startswith("create_"):
+                                    slot = int(data_cb.split("_")[1])
+                                    result = generate_wallet(chat_id, slot)
                                     send_telegram_message(result)
                                     msg, kb = show_wallet_manager(chat_id)
                                     send_telegram_message(msg, kb)
-                                elif data_cb == "price":
-                                    if price_history:
-                                        send_telegram_message(f"💹 Prix : <b>{price_history[-1]:.3f} $</b>", get_main_keyboard())
+                                elif data_cb.startswith("delete_ask_"):
+                                    slot = int(data_cb.split("_")[2])
+                                    confirm_kb = {"inline_keyboard": [
+                                        [{"text": "✅ Oui, supprimer", "callback_data": f"delete_confirm_{slot}"}],
+                                        [{"text": "❌ Annuler", "callback_data": "manage_wallets"}]
+                                    ]}
+                                    send_telegram_message(f"⚠️ Es-tu sûr de vouloir supprimer le Wallet {slot} ? Cette action est irréversible.", confirm_kb)
+                                elif data_cb.startswith("delete_confirm_"):
+                                    slot = int(data_cb.split("_")[2])
+                                    result = delete_wallet(chat_id, slot)
+                                    send_telegram_message(result)
+                                    msg, kb = show_wallet_manager(chat_id)
+                                    send_telegram_message(msg, kb)
                                 elif data_cb == "deposit":
                                     pending_actions[chat_id] = {"action": "deposit", "amount": 0}
                                     send_telegram_message("💰 <b>Dépôt</b>\nCombien ? (Envoie un nombre)", None)
@@ -195,6 +204,7 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
         except Exception as e: print(f"Erreur Telegram : {e}")
         time.sleep(1)
 
+# ... (Le reste du code est identique : build_stats_message, load_config, etc.) ...
 def build_stats_message(state, config):
     total = state["capital_usd"] + state["safe_capital_usd"]
     pos = "OUI" if state["position_open"] else "NON"
@@ -206,7 +216,6 @@ def build_stats_message(state, config):
             f"💵 PnL Réalisé : {state['realized_pnl_usd']:+.4f} $\n"
             f"💸 Frais payés : {state['total_fees_usd']:.4f} $")
 
-# --- LE RESTE DU CODE (Identique) ---
 def load_config(path="config.json"):
     try:
         with open(path, "r", encoding="utf-8") as f: return json.load(f)
