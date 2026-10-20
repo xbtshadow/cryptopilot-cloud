@@ -129,16 +129,16 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                                     if action == "deposit":
                                         pending_actions[chat_id]["amount"] = amount
                                         confirm_kb = {"inline_keyboard": [[{"text": "✅ Confirmer", "callback_data": f"confirm_{action}"}], [{"text": "❌ Annuler", "callback_data": "cancel_action"}]]}
-                                        send_telegram_message(f"💰 Déposer <b>{amount:.2f} $</b> ?", confirm_kb)
+                                        send_telegram_message(f"💰 Tu souhaites déposer <b>{amount:.2f} $</b>.\nConfirmes-tu ?", confirm_kb)
                                     elif action == "withdraw":
                                         if amount > state["capital_usd"]:
-                                            send_telegram_message(f"❌ Fonds insuffisants. Capital : <b>{state['capital_usd']:.2f} $</b>.", get_main_keyboard())
+                                            send_telegram_message(f"❌ Fonds insuffisants. Ton capital de trading est de <b>{state['capital_usd']:.2f} $</b>.", get_main_keyboard())
                                         else:
                                             pending_actions[chat_id]["amount"] = amount
                                             confirm_kb = {"inline_keyboard": [[{"text": "✅ Confirmer", "callback_data": f"confirm_{action}"}], [{"text": "❌ Annuler", "callback_data": "cancel_action"}]]}
-                                            send_telegram_message(f"💸 Retirer <b>{amount:.2f} $</b> ?", confirm_kb)
+                                            send_telegram_message(f"💸 Tu souhaites retirer <b>{amount:.2f} $</b>.\nConfirmes-tu ?", confirm_kb)
                                 except ValueError:
-                                    send_telegram_message("❌ Montant invalide.", get_main_keyboard())
+                                    send_telegram_message("❌ Montant invalide. Envoie un nombre positif (ex: 50).", get_main_keyboard())
                                 del pending_actions[chat_id]
 
                         elif "callback_query" in update:
@@ -176,10 +176,12 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                                     send_telegram_message(msg, kb)
                                 elif data_cb == "deposit":
                                     pending_actions[chat_id] = {"action": "deposit", "amount": 0}
-                                    send_telegram_message("💰 <b>Dépôt</b>\nCombien ? (Envoie un nombre)", None)
+                                    # NOUVEAU MESSAGE CLAIR
+                                    send_telegram_message("💰 <b>Dépôt</b>\nQuel montant en <b>$</b> souhaites-tu déposer ?\n(Envoie un nombre, ex: 50)", None)
                                 elif data_cb == "withdraw":
                                     pending_actions[chat_id] = {"action": "withdraw", "amount": 0}
-                                    send_telegram_message("💸 <b>Retrait</b>\nCombien ? (Envoie un nombre)", None)
+                                    # NOUVEAU MESSAGE CLAIR
+                                    send_telegram_message("💸 <b>Retrait</b>\nQuel montant en <b>$</b> souhaites-tu retirer ?\n(Envoie un nombre, ex: 20)", None)
                                 elif data_cb.startswith("confirm_"):
                                     action = data_cb.replace("confirm_", "")
                                     if chat_id in pending_actions and pending_actions[chat_id].get("amount", 0) > 0:
