@@ -32,6 +32,9 @@ else:
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
+# Pour éviter le spam de messages d'erreur
+last_error_time = 0
+
 def send_telegram_message(message, reply_markup=None):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return 
     try:
@@ -62,7 +65,7 @@ def get_main_keyboard():
 # --- GESTION DES WALLETS AVEC GESTION D'ERREUR ---
 def generate_wallet(chat_id):
     if not r:
-        return "❌ Erreur : La base de données (Redis) n'est pas connectée. Vérifie tes variables d'environnement sur Render."
+        return "❌ Erreur : La base de données (Redis) n'est pas connectée sur Render."
     if not Account:
         return "❌ Erreur : La librairie `eth-account` n'est pas installée. Ajoute-la dans `requirements.txt` sur GitHub et redémarre."
     
@@ -78,10 +81,7 @@ def generate_wallet(chat_id):
         address = acct.address
         private_key = acct.key.hex()
 
-        wallet_data = {
-            "address": address,
-            "private_key": private_key
-        }
+        wallet_data = {"address": address, "private_key": private_key}
         wallet_key = f"wallet:{chat_id}:{count + 1}"
         r.set(wallet_key, json.dumps(wallet_data))
         r.incr(count_key)
@@ -91,7 +91,7 @@ def generate_wallet(chat_id):
                 f"🔒 <i>La clé privée a été générée et stockée de manière sécurisée dans la base de données.</i>\n"
                 f"<b>Compte {count + 1}/2</b>")
     except Exception as e:
-        return f"❌ Erreur lors de la génération du wallet : {str(e)}"
+        return f"❌ Erreur inattendue du wallet : {str(e)}"
 
 def listen_telegram_commands(state, config, price_history, pending_actions):
     last_update_id = 0
@@ -105,7 +105,6 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                     for update in data["result"]:
                         last_update_id = update["update_id"] + 1
                         
-                        # Gestion des messages texte
                         if "message" in update and "text" in update["message"]:
                             text = update["message"]["text"]
                             chat_id = update["message"]["chat"]["id"]
@@ -114,8 +113,7 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                             if text in ["/start", "/menu"]:
                                 send_telegram_message("🤖 <b>Bienvenue sur CryptoPilot BSC</b>\nChoisis une option :", get_main_keyboard())
                             elif text == "/wallet":
-                                msg = generate_wallet(chat_id)
-                                send_telegram_message(msg, get_main_keyboard())
+                                send_telegram_message(generate_wallet(chat_id), get_main_keyboard())
                             elif text == "/stats":
                                 send_telegram_message(build_stats_message(state, config), get_main_keyboard())
                             elif text == "/price":
@@ -142,21 +140,18 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                                     send_telegram_message("❌ Montant invalide.", get_main_keyboard())
                                 del pending_actions[chat_id]
 
-                        # Gestion des clics sur les boutons
                         elif "callback_query" in update:
                             callback = update["callback_query"]
                             chat_id = callback["message"]["chat"]["id"]
                             data_cb = callback["data"]
                             
-                            # On nettoie l'action en cours si on clique sur un bouton
                             pending_actions.pop(chat_id, None)
                             
                             try:
                                 if data_cb == "stats":
                                     send_telegram_message(build_stats_message(state, config), get_main_keyboard())
                                 elif data_cb == "wallet":
-                                    msg = generate_wallet(chat_id)
-                                    send_telegram_message(msg, get_main_keyboard())
+                                    send_telegram_message(generate_wallet(chat_id), get_main_keyboard())
                                 elif data_cb == "price":
                                     if price_history:
                                         send_telegram_message(f"💹 Prix : <b>{price_history[-1]:.3f} $</b>", get_main_keyboard())
@@ -184,11 +179,9 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                             except Exception as e:
                                 send_telegram_message(f"❌ Erreur de traitement : {e}", get_main_keyboard())
                             finally:
-                                # Toujours répondre à Telegram pour arrêter le chargement du bouton
                                 try:
                                     urllib.request.urlopen(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery?callback_query_id={callback['id']}")
-                                except:
-                                    pass
+                                except: pass
 
         except Exception as e:
             print(f"Erreur Telegram listener : {e}")
@@ -205,7 +198,6 @@ def build_stats_message(state, config):
             f"💵 PnL Réalisé : {state['realized_pnl_usd']:+.4f} $\n"
             f"💸 Frais payés : {state['total_fees_usd']:.4f} $")
 
-# --- GESTION DES FICHIERS ET DE LA BDD ---
 def load_config(path="config.json"):
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -219,7 +211,7 @@ def load_config(path="config.json"):
             "trailing_stop_percent": 2.0, "ema_fast": 5, "ema_slow": 15,
             "rsi_period": 10, "estimated_gas_cost_usd": 0.15,
             "estimated_trading_fee_percent": 0.25, "estimated_slippage_percent": 0.5,
-            "pair": "CAKE/USDT" # On utilise le nom exact pour l'API
+            "pair_address": "0x8040E01d9e5c9cCF7E4E6C34b1E90F9dEC20D994" # Adresse exacte du pool CAKE/USDT sur PancakeSwap
         }
 
 def load_state(config):
@@ -257,27 +249,17 @@ def save_history(history):
         try: r.set("cryptopilot_history", json.dumps(history[-100:]))
         except Exception: pass
 
-# --- CORRECTION DU PRIX : Recherche fiable sur PancakeSwap ---
-def get_real_price(pair_name):
-    # On utilise l'API de recherche avec le nom
-    url = f"https://api.dexscreener.com/latest/dex/search?q={pair_name}"
+# --- CORRECTION DU PRIX : Utilisation de l'adresse exacte du pool ---
+def get_real_price(pair_address):
+    url = f"https://api.dexscreener.com/latest/dex/pairs/bsc/{pair_address}"
     try:
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req, timeout=10) as response:
             data = json.loads(response.read().decode())
-            if data.get("pairs"):
-                # On filtre pour trouver la paire sur PancakeSwap avec la plus grosse liquidité
-                best_pair = None
-                max_liquidity = 0
-                for p in data["pairs"]:
-                    if p.get("dexId") == "pancakeswap":
-                        liq = float(p.get("liquidity", {}).get("usd", 0))
-                        if liq > max_liquidity:
-                            max_liquidity = liq
-                            best_pair = p
-                
-                if best_pair:
-                    return float(best_pair["priceUsd"])
+            if data.get("pair"):
+                return float(data["pair"]["priceUsd"])
+            elif data.get("pairs") and len(data["pairs"]) > 0:
+                return float(data["pairs"][0]["priceUsd"])
     except Exception as e:
         print(f"Erreur prix: {e}")
     return None
@@ -303,11 +285,15 @@ def calculate_rsi(prices, period=14):
     return 100 - (100 / (1 + rs))
 
 def simulate_buy(state, price, config):
+    global last_error_time
     token_address = "0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82" 
     try:
         security_check = check_token_security(token_address)
         if not security_check["safe"]: 
-            send_telegram_message(f"❌ Achat bloqué : {security_check['reason']}")
+            # On n'envoie le message d'erreur que toutes les 10 minutes pour éviter le spam
+            if time.time() - last_error_time > 600:
+                send_telegram_message(f"❌ Achat bloqué : {security_check['reason']}")
+                last_error_time = time.time()
             return state
     except Exception: return state
 
@@ -386,7 +372,8 @@ def main():
 
     while True:
         try:
-            current_price = get_real_price(config.get("pair", "CAKE/USDT"))
+            # Utilisation de l'adresse exacte du pool CAKE/USDT
+            current_price = get_real_price(config.get("pair_address", "0x8040E01d9e5c9cCF7E4E6C34b1E90F9dEC20D994"))
             if current_price:
                 price_history.append(current_price)
                 if len(price_history) > 100: price_history.pop(0)
