@@ -8,13 +8,11 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from security import check_token_security
 
-# --- LECTURE DES SECRETS DEPUIS LE CLOUD ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 def send_telegram_message(message):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        return 
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return 
     try:
         encoded_message = urllib.parse.quote_plus(message)
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage?chat_id={TELEGRAM_CHAT_ID}&text={encoded_message}"
@@ -22,18 +20,55 @@ def send_telegram_message(message):
     except Exception as e:
         print(f"⚠️ Erreur Telegram : {e}")
 
-# --- MINI SERVEUR WEB POUR UPTIMEROBOT / RENDER ---
+# --- NOUVELLE FONCTION : ÉCOUTER TES COMMANDES TELEGRAM ---
+def listen_telegram_commands(state, config):
+    last_update_id = 0
+    while True:
+        try:
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?offset={last_update_id}&timeout=10"
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=15) as response:
+                data = json.loads(response.read().decode())
+                if data.get("result"):
+                    for update in data["result"]:
+                        last_update_id = update["update_id"] + 1
+                        if "message" in update and "text" in update["message"]:
+                            text = update["message"]["text"]
+                            if text == "/stats" or text == "/pnl":
+                                # Construction du message de stats
+                                trade_cap = state["capital_usd"]
+                                safe_cap = state["safe_capital_usd"]
+                                total_cap = trade_cap + safe_cap
+                                
+                                if state["position_open"]:
+                                    pos_status = f"OUI (Acheté à {state['entry_price']:.2f} $)"
+                                else:
+                                    pos_status = "NON"
+                                    
+                                msg = (f"📊 TABLEAU DE BORD 📊\n"
+                                       f"💰 Capital Trading : {trade_cap:.2f} $\n"
+                                       f"🔒 Coffre-fort : {safe_cap:.2f} $\n"
+                                       f"💎 Total : {total_cap:.2f} $\n"
+                                       f"📈 Position Ouverte : {pos_status}\n"
+                                       f"💵 PnL Réalisé : {state['realized_pnl_usd']:+.4f} $\n"
+                                       f"💸 Frais payés : {state['total_fees_usd']:.4f} $")
+                                send_telegram_message(msg)
+        except Exception:
+            pass
+        time.sleep(2)
+
+# --- MINI SERVEUR WEB POUR UPTIMEROBOT ---
 class WebHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
         self.end_headers()
         self.wfile.write(b"Bot is alive")
-        
     def do_HEAD(self):
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
         self.end_headers()
+
 def run_web_server():
     port = int(os.environ.get("PORT", 8080))
     server = HTTPServer(('0.0.0.0', port), WebHandler)
@@ -104,7 +139,7 @@ def calculate_ema(prices, period):
     ema = prices[0]
     multiplier = 2 / (period + 1)
     for price in prices[1:]:
-        ema = (price - ema) * multiplier + ema
+        ema = (ema * (1 - multiplier)) + (price * multiplier)
     return ema
 
 def calculate_rsi(prices, period=14):
@@ -124,10 +159,8 @@ def simulate_buy(state, price, config):
     token_address = "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c" 
     try:
         security_check = check_token_security(token_address)
-        if not security_check["safe"]:
-            return state
-    except Exception:
-        return state
+        if not security_check["safe"]: return state
+    except Exception: return state
 
     amount_usd = state["capital_usd"] * (config["position_size_percent"] / 100.0)
     gas = config["estimated_gas_cost_usd"]
@@ -143,7 +176,7 @@ def simulate_buy(state, price, config):
     state["entry_price"] = price
     state["highest_price"] = price
     state["total_fees_usd"] += gas + fee
-    send_telegram_message(f"🚀 ACHAT !\nPrix : {price:.2f} $\nMontant : {amount_usd:.2f} $")
+    send_telegram_message(f"🚀 ACHAT !\nPrix : {price:.2f} $\nMontant : {amount_usd:.2f} $\nCapital restant : {state['capital_usd']:.2f} $")
     return state
 
 def simulate_sell(state, price, config, reason="Signal"):
@@ -172,7 +205,7 @@ def simulate_sell(state, price, config, reason="Signal"):
         state["safe_capital_usd"] += secure_amount
 
     emoji = "💰" if pnl > 0 else "🛑"
-    send_telegram_message(f"{emoji} VENTE ({reason}) !\nPrix : {price:.2f} $\nPnL Net : {pnl:+.4f} $")
+    send_telegram_message(f"{emoji} VENTE ({reason}) !\nPrix : {price:.2f} $\nPnL Net : {pnl:+.4f} $\nCapital Trade : {state['capital_usd']:.2f} $\nSafe : {state['safe_capital_usd']:.2f} $")
     return state
 
 def main():
@@ -182,7 +215,10 @@ def main():
     state = load_state()
     price_history = load_history()
     
-    send_telegram_message("🤖 Le bot CryptoPilot est EN LIGNE sur le Cloud 24/7 !")
+    # Lancer l'écoute des commandes Telegram en arrière-plan
+    threading.Thread(target=listen_telegram_commands, args=(state, config), daemon=True).start()
+    
+    send_telegram_message("🤖 Le bot CryptoPilot est EN LIGNE sur le Cloud 24/7 !\nTape /stats pour voir tes performances.")
 
     while True:
         try:
