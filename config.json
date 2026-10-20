@@ -1,17 +1,12 @@
 {
-  "paper_trading": true,
   "initial_capital_usd": 100.0,
   "safe_capital_percentage": 50.0,
   "profit_secure_percentage": 80.0,
   "position_size_percent": 60.0,
-  "pair": "WBNB_USDT",
-  "chain": "bsc",
-  "dex": "pancakeswap",
-  "min_gain_after_fees_percent": 2.0,
   "stop_loss_percent": 5.0,
   "anti_crash_drop_percent": 30.0,
-  "take_profit_percent": 10.0,
-  "trailing_stop_activation_pct": 5.0,
+  "take_profit_percent": 15.0,
+  "trailing_stop_activation_pct": 8.0,
   "trailing_stop_percent": 2.0,
   "ema_fast": 5,
   "ema_slow": 15,
@@ -19,7 +14,7 @@
   "estimated_gas_cost_usd": 0.15,
   "estimated_trading_fee_percent": 0.25,
   "estimated_slippage_percent": 0.5,
-  "max_drawdown_percent": 20.0,
-  "log_file": "cryptopilot.log",
-  "state_file": "state.json"
+  "pair_address": "0x8040E01d9e5c9cCF7E4E6C34b1E90F9dEC20D994",
+  "telegram_token": "8951741725:AAEGFe_XYz8fQuWMP8zmSQQ6H_Nz6J1hsyI",
+  "telegram_chat_id": "8883374289"
 }
