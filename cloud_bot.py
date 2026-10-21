@@ -22,6 +22,7 @@ TRAILING_STOP_ACTIVATION_PCT = 10.0
 TRAILING_STOP_PERCENT = 2.0          
 TAKE_PROFIT_PERCENT = 50.0           
 MAX_DRAWDOWN_PERCENT = 20.0          
+ITEMS_PER_PAGE = 5 # Nombre d'éléments par page d'historique
 
 REDIS_URL = os.getenv("REDIS_URL")
 r = None
@@ -54,12 +55,13 @@ def get_main_keyboard(state):
         "inline_keyboard": [
             [{"text": "📊 Stats", "callback_data": "stats"}, {"text": "🌐 Marché", "callback_data": "market"}],
             [{"text": "💰 Déposer", "callback_data": "deposit"}, {"text": "💸 Retirer", "callback_data": "withdraw"}],
-            [{"text": btn_pause, "callback_data": "toggle_pause"}, {"text": "📜 Historique", "callback_data": "history"}],
-            [{"text": "🔑 Mes Wallets", "callback_data": "manage_wallets"}, {"text": "🛠️ Debug", "callback_data": "debug"}]
+            [{"text": btn_pause, "callback_data": "toggle_pause"}, {"text": "📜 Trades", "callback_data": "history_page_0"}],
+            [{"text": "🧾 Transactions", "callback_data": "tx_history_page_0"}, {"text": "🔑 Mes Wallets", "callback_data": "manage_wallets"}],
+            [{"text": "🛠️ Debug", "callback_data": "debug"}]
         ]
     }
 
-# --- GESTION DES WALLETS (Identique) ---
+# --- GESTION DES WALLETS ---
 def get_wallets(chat_id):
     wallets = {}
     if not r: return wallets
@@ -102,7 +104,7 @@ def show_wallet_manager(chat_id):
     buttons.append([{"text": "⬅️ Retour", "callback_data": "back_menu"}])
     return msg, {"inline_keyboard": buttons}
 
-# --- MARCHÉ (Identique) ---
+# --- MARCHÉ ---
 def get_market_prices():
     msg = "🌐 <b>PRIX DU MARCHÉ</b> 🌐\n\n"
     url = "https://pro-api.coinmarketcap.com/public-api/v1/cryptocurrency/listings/latest?limit=20&convert=USD"
@@ -119,6 +121,65 @@ def get_market_prices():
             return msg
     except Exception:
         return "❌ Impossible de récupérer les prix."
+
+# --- FONCTIONS D'HISTORIQUE PAGINÉ ---
+def build_trade_history_msg(state, page):
+    hist = state.get("trade_history", [])
+    if not hist: return "📜 Aucun trade enregistré.", get_main_keyboard(state)
+    
+    total_pages = (len(hist) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
+    if page < 0: page = 0
+    if page >= total_pages: page = total_pages - 1
+    
+    # On inverse pour avoir le plus récent en premier
+    reversed_hist = list(reversed(hist))
+    start = page * ITEMS_PER_PAGE
+    end = start + ITEMS_PER_PAGE
+    page_items = reversed_hist[start:end]
+
+    msg = f"📜 <b>HISTORIQUE DES TRADES</b> (Page {page+1}/{total_pages})\n\n"
+    for t in page_items:
+        emoji = "🟢" if t['pnl'] > 0 else "🔴"
+        msg += f"{emoji} {t['date']}\nAchat: {t['entry']:.2f}$ | Vente: {t['exit']:.2f}$\nQuantité: {t.get('qty', 0):.4f} BNB\nPnL: {t['pnl']:+.2f} USDT\n\n"
+
+    buttons = []
+    nav_row = []
+    if page > 0: nav_row.append({"text": "⬅️ Précédent", "callback_data": f"history_page_{page-1}"})
+    if page < total_pages - 1: nav_row.append({"text": "Suivant ➡️", "callback_data": f"history_page_{page+1}"})
+    if nav_row: buttons.append(nav_row)
+    buttons.append([{"text": "⬅️ Menu", "callback_data": "back_menu"}])
+
+    return msg, {"inline_keyboard": buttons}
+
+def build_tx_history_msg(state, page):
+    hist = state.get("tx_history", [])
+    if not hist: return "🧾 Aucune transaction (dépôt/retrait) enregistrée.", get_main_keyboard(state)
+    
+    total_pages = (len(hist) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
+    if page < 0: page = 0
+    if page >= total_pages: page = total_pages - 1
+    
+    reversed_hist = list(reversed(hist))
+    start = page * ITEMS_PER_PAGE
+    end = start + ITEMS_PER_PAGE
+    page_items = reversed_hist[start:end]
+
+    msg = f"🧾 <b>HISTORIQUE DES TRANSACTIONS</b> (Page {page+1}/{total_pages})\n\n"
+    for t in page_items:
+        emoji = "🟢" if t['type'] == "DÉPÔT" else "🔴"
+        msg += f"{emoji} <b>{t['type']}</b> - {t['date']}\nMontant : {t['amount']:.2f} USDT\nRéseau : {t.get('chain', 'BSC')}\n"
+        if t.get('address'):
+            msg += f"Adresse : <code>{t['address']}</code>\n"
+        msg += "\n"
+
+    buttons = []
+    nav_row = []
+    if page > 0: nav_row.append({"text": "⬅️ Précédent", "callback_data": f"tx_history_page_{page-1}"})
+    if page < total_pages - 1: nav_row.append({"text": "Suivant ➡️", "callback_data": f"tx_history_page_{page+1}"})
+    if nav_row: buttons.append(nav_row)
+    buttons.append([{"text": "⬅️ Menu", "callback_data": "back_menu"}])
+
+    return msg, {"inline_keyboard": buttons}
 
 # --- COMMANDES TELEGRAM ---
 def listen_telegram_commands(state, config, price_history, pending_actions):
@@ -155,6 +216,18 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                                             continue
 
                                         state["capital_usd"] -= amount
+                                        
+                                        # Enregistrement du retrait
+                                        tx_record = {
+                                            "date": datetime.now().strftime("%d/%m %H:%M"),
+                                            "type": "RETRAIT",
+                                            "amount": amount,
+                                            "chain": chain,
+                                            "address": address
+                                        }
+                                        if "tx_history" not in state: state["tx_history"] = []
+                                        state["tx_history"].append(tx_record)
+
                                         save_state(state)
                                         send_telegram_message(f"✅ <b>Retrait initié !</b>\nEnvoi de <b>{amount:.2f} USDT</b> sur le réseau <b>{chain}</b> vers :\n<code>{address}</code>\n\n<i>(Simulation : Aucun fond réel n'a été envoyé).</i>\n\n" + build_stats_message(state), get_main_keyboard(state))
                                         del pending_actions[chat_id]
@@ -193,22 +266,25 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                                     save_state(state)
                                     status = "⏸️ EN PAUSE" if state["is_paused"] else "▶️ EN MARCHE"
                                     send_telegram_message(f"Statut mis à jour : <b>{status}</b>", get_main_keyboard(state))
-                                elif data_cb == "history":
-                                    hist = state.get("trade_history", [])
-                                    if not hist: msg = "📜 Aucun trade enregistré."
-                                    else:
-                                        msg = "📜 <b>5 DERNIERS TRADES (USDT <-> BNB)</b>\n\n"
-                                        for t in reversed(hist[-5:]):
-                                            emoji = "🟢" if t['pnl'] > 0 else "🔴"
-                                            msg += f"{emoji} {t['date']}\nAchat: {t['entry']:.2f}$ | Vente: {t['exit']:.2f}$\nQuantité: {t.get('qty', 0):.4f} BNB\nPnL: {t['pnl']:+.2f} USDT\n\n"
-                                    send_telegram_message(msg, get_main_keyboard(state))
+                                
+                                # --- PAGINATION DES TRADES ---
+                                elif data_cb.startswith("history_page_"):
+                                    page = int(data_cb.split("_")[2])
+                                    msg, kb = build_trade_history_msg(state, page)
+                                    send_telegram_message(msg, kb)
+                                
+                                # --- PAGINATION DES TRANSACTIONS ---
+                                elif data_cb.startswith("tx_history_page_"):
+                                    page = int(data_cb.split("_")[3])
+                                    msg, kb = build_tx_history_msg(state, page)
+                                    send_telegram_message(msg, kb)
+
                                 elif data_cb == "debug":
                                     msg = "🛠️ <b>MODE DEBUG</b> 🛠️\n\n"
                                     msg += f"💰 Capital : {state['capital_usd']:.2f} USDT\n"
                                     msg += f"Pause : {state.get('is_paused', False)}\n"
                                     msg += f"Trades total : {state.get('total_trades', 0)}\n"
                                     msg += f"Historique : {len(price_history)} points\n\n"
-                                    
                                     price = get_real_price(config.get("pair_address", "0x16b9a82891338f9bA80E2D6970FddA79D1eb0daE"))
                                     if not price: msg += "❌ Impossible de récupérer le prix."
                                     else:
@@ -304,9 +380,20 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                                         
                                         state["capital_usd"] += amount
                                         state["total_deposited"] = state.get("total_deposited", 0) + amount
-                                        state["peak_capital"] = max(state.get("peak_capital", 0), state["capital_usd"])
+                                        state["peak_capital"] = max(state.get("peak_capital",b 0), state["capital_usd"])
+                                        
+                                        # Enregistrement du dépôt
+                                        tx_record = {
+                                            "date": datetime.now().strftime("%d>\/%m %H:%M"),
+                                            "type": "DÉPÔT",
+                                            "amount": amount,
+                                           n "chain": chain
+                                        }
+                                        if "tx_history" not in state: state["tx_history"] = []
+                                        state["tx_history"].appendD(tx_record)
+                                        
                                         save_state(state)
-                                        send_telegram_message(f"✅ <b>Transaction confirmée sur {chain} !</b>\nDépôt de <b>{amount:.2f} USDT</b> effectué.\n\n" + build_stats_message(state), get_main_keyboard(state))
+                                        send_telegram_message(f"✅ <b>Transaction confirmée sur {chain} !</épôt de <b>{amount:.2f} USDT</b> effectué.\n\n" + build_stats_message(state), get_main_keyboard(state))
                                     else:
                                         send_telegram_message("❌ Aucune opération en attente.", get_main_keyboard(state))
                                     pending_actions.pop(chat_id, None)
@@ -355,7 +442,7 @@ def load_state(config):
             data = r.get("cryptopilot_state")
             if data: return json.loads(data)
         except Exception: pass
-    return {"capital_usd": config.get("initial_capital_usd", 0.0), "total_deposited": 0.0, "peak_capital": 0.0, "position_open": False, "position_amount_usd": 0.0, "position_quantity": 0.0, "entry_price": 0.0, "highest_price": 0.0, "total_fees_usd": 0.0, "realized_pnl_usd": 0.0, "total_trades": 0, "winning_trades": 0, "is_paused": False, "trade_history": []}
+    return {"capital_usd": config.get("initial_capital_usd", 0.0), "total_deposited": 0.0, "peak_capital": 0.0, "position_open": False, "position_amount_usd": 0.0, "position_quantity": 0.0, "entry_price": 0.0, "highest_price": 0.0, "total_fees_usd": 0.0, "realized_pnl_usd": 0.0, "total_trades": 0, "winning_trades": 0, "is_paused": False, "trade_history": [], "tx_history": []}
 
 def save_state(state):
     if r:
@@ -418,10 +505,7 @@ def simulate_buy(state, price, config):
             return state
     except Exception: return state
 
-    # Montant en USDT à utiliser
     amount_usdt = state["capital_usd"] * (config["position_size_percent"] / 100.0)
-    
-    # Calcul des frais
     gas = config["estimated_gas_cost_usd"]
     fee = amount_usdt * (config["estimated_trading_fee_percent"] / 100.0)
     slippage = amount_usdt * (config["estimated_slippage_percent"] / 100.0)
@@ -429,10 +513,8 @@ def simulate_buy(state, price, config):
 
     if total_cost > state["capital_usd"]: return state
 
-    # Calcul de la quantité de BNB achetée
     quantity = amount_usdt / price
 
-    # Mise à jour de l'état
     state["capital_usd"] -= total_cost
     state["position_open"] = True
     state["position_amount_usd"] = amount_usdt
@@ -441,7 +523,6 @@ def simulate_buy(state, price, config):
     state["highest_price"] = price
     state["total_fees_usd"] += gas + fee
     
-    # Notification claire : USDT -> BNB
     send_telegram_message(f"🚀 <b>ACHAT</b>\nAcheté : <b>{quantity:.4f} BNB</b>\nAvec : {amount_usdt:.2f} USDT\nPrix : {price:.3f} $")
     return state
 
@@ -451,10 +532,7 @@ def simulate_sell(state, price, config, reason="Signal"):
     quantity = state["position_quantity"]
     amount_usdt = state["position_amount_usd"]
     
-    # Calcul de la valeur actuelle en USDT
     current_value = quantity * price
-    
-    # Calcul des frais
     gas = config["estimated_gas_cost_usd"]
     fee = current_value * (config["estimated_trading_fee_percent"] / 100.0)
     slippage = current_value * (config["estimated_slippage_percent"] / 100.0)
@@ -462,7 +540,6 @@ def simulate_sell(state, price, config, reason="Signal"):
 
     pnl = net_proceeds - amount_usdt - gas
     
-    # Mise à jour de l'état
     state["capital_usd"] += net_proceeds
     state["total_fees_usd"] += gas + fee
     state["realized_pnl_usd"] += pnl
@@ -485,7 +562,6 @@ def simulate_sell(state, price, config, reason="Signal"):
     if "trade_history" not in state: state["trade_history"] = []
     state["trade_history"].append(trade_record)
 
-    # Notification claire : BNB -> USDT
     emoji = "💰" if pnl > 0 else "🛑"
     send_telegram_message(f"{emoji} <b>VENTE ({reason})</b>\nVendu : <b>{quantity:.4f} BNB</b>\nReçu : {net_proceeds:.2f} USDT\nPrix : {price:.3f} $\nPnL Net : {pnl:+.4f} USDT")
     return state
