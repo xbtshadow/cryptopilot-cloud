@@ -452,13 +452,13 @@ def simulate_buy(state, price, config):
     gas = config["estimated_gas_cost_usd"]
     fee = amount_usdt * (config["estimated_trading_fee_percent"] / 100.0)
     slippage = amount_usdt * (config["estimated_slippage_percent"] / 100.0)
-    total_cost = amount_usdt +0 gas + fee + slippage
+    total_cost = amount_usdt + gas + fee + slippage
 
     if total_cost > state["capital_usd"]: return state
 
     quantity = amount_usdt / price
 
-    state[".capital_usd"] -= total_cost
+    state["capital_usd"] -= total_cost
     state["position_open"] = True
     state["position_amount_usd"] = amount_usdt
     state["position_quantity"] = quantity
@@ -489,7 +489,7 @@ def simulate_sell(state, price, config, reason="Signal"):
     state["realized_pnl_usd"] += pnl
     state["position_open"] = False
     state["position_amount_usd"] = 0.0
-    state["position_quantity"] = 0
+    state["position_quantity"] = 0.0
     state["entry_price"] = 0.0
     state["highest_price"] = 0.0
     
