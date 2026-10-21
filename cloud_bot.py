@@ -22,7 +22,11 @@ TRAILING_STOP_ACTIVATION_PCT = 10.0
 TRAILING_STOP_PERCENT = 2.0          
 TAKE_PROFIT_PERCENT = 50.0           
 MAX_DRAWDOWN_PERCENT = 20.0          
-ITEMS_PER_PAGE = 5 # Nombre d'éléments par page d'historique
+ITEMS_PER_PAGE = 5
+
+# --- NOUVEAUX SEUILS POUR LA STRATÉGIE "BUY THE DIP" ---
+RSI_BUY_THRESHOLD = 40.0  # Acheter si le RSI est en dessous de 40 (prix bas)
+RSI_SELL_THRESHOLD = 70.0 # Vendre si le RSI est au-dessus de 70 (prix haut)
 
 REDIS_URL = os.getenv("REDIS_URL")
 r = None
@@ -131,7 +135,6 @@ def build_trade_history_msg(state, page):
     if page < 0: page = 0
     if page >= total_pages: page = total_pages - 1
     
-    # On inverse pour avoir le plus récent en premier
     reversed_hist = list(reversed(hist))
     start = page * ITEMS_PER_PAGE
     end = start + ITEMS_PER_PAGE
@@ -217,7 +220,6 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
 
                                         state["capital_usd"] -= amount
                                         
-                                        # Enregistrement du retrait
                                         tx_record = {
                                             "date": datetime.now().strftime("%d/%m %H:%M"),
                                             "type": "RETRAIT",
@@ -267,18 +269,17 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                                     status = "⏸️ EN PAUSE" if state["is_paused"] else "▶️ EN MARCHE"
                                     send_telegram_message(f"Statut mis à jour : <b>{status}</b>", get_main_keyboard(state))
                                 
-                                # --- PAGINATION DES TRADES ---
                                 elif data_cb.startswith("history_page_"):
                                     page = int(data_cb.split("_")[2])
                                     msg, kb = build_trade_history_msg(state, page)
                                     send_telegram_message(msg, kb)
                                 
-                                # --- PAGINATION DES TRANSACTIONS ---
                                 elif data_cb.startswith("tx_history_page_"):
                                     page = int(data_cb.split("_")[3])
                                     msg, kb = build_tx_history_msg(state, page)
                                     send_telegram_message(msg, kb)
 
+                                # --- DEBUG MIS A JOUR POUR LA NOUVELLE STRATÉGIE ---
                                 elif data_cb == "debug":
                                     msg = "🛠️ <b>MODE DEBUG</b> 🛠️\n\n"
                                     msg += f"💰 Capital : {state['capital_usd']:.2f} USDT\n"
@@ -292,23 +293,23 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                                         if len(price_history) < config["ema_slow"]:
                                             msg += f"⏳ Attente d'historique : {len(price_history)}/{config['ema_slow']} points."
                                         else:
-                                            ema_f = calculate_ema(price_history, config["ema_fast"])
-                                            ema_s = calculate_ema(price_history, config["ema_slow"])
                                             rsi = calculate_rsi(price_history, config["rsi_period"])
-                                            is_price_falling = len(price_history) >= 3 and price < price_history[-2]
+                                            msg += f"🌡️ RSI : {rsi:.1f}\n\n"
                                             
-                                            msg += f"📊 EMA5 : {ema_f:.2f}\n📉 EMA15 : {ema_s:.2f}\n🌡️ RSI : {rsi:.1f}\n"
-                                            msg += f"📉 Prix en baisse : {'OUI' if is_price_falling else 'NON'}\n\n"
-                                            
-                                            if ema_f > ema_s and rsi < 70:
-                                                if is_price_falling:
-                                                    msg += "⚠️ EMA et RSI OK, MAIS le prix est en train de chuter. Le bot attend que ça remonte."
+                                            if not state["position_open"]:
+                                                msg += f"🎯 Stratégie : Acheter si RSI < {RSI_BUY_THRESHOLD}\n"
+                                                if rsi < RSI_BUY_THRESHOLD:
+                                                    msg += "✅ Le prix est bas (RSI bas). Le bot va ACHETER au prochain cycle !"
                                                 else:
-                                                    msg += "✅ Toutes les conditions sont remplies ! Le bot va acheter du BNB avec tes USDT au prochain cycle."
+                                                    msg += f"⏳ Le prix est encore trop haut pour acheter. (RSI actuel : {rsi:.1f})"
                                             else:
-                                                msg += "⏳ Condition d'ACHAT NON remplie.\n"
-                                                if ema_f <= ema_s: msg += "  - Tendance baissière (EMA5 < EMA15)\n"
-                                                if rsi >= 70: msg += "  - Marché en surchauffe (RSI > 70)\n"
+                                                pnl_percent = ((price - state["entry_price"]) / state["entry_price"]) * 100
+                                                msg += f"🎯 Stratégie : Vendre si RSI > {RSI_SELL_THRESHOLD} ou PnL cible.\n"
+                                                msg += f"📈 PnL Actuel : {pnl_percent:+.2f}%\n"
+                                                if rsi > RSI_SELL_THRESHOLD:
+                                                    msg += "✅ Le prix est haut (RSI haut). Le bot va VENDRE au prochain cycle !"
+                                                else:
+                                                    msg += f"⏳ Le prix n'est pas encore assez haut pour vendre."
                                     send_telegram_message(msg, get_main_keyboard(state))
 
                                 elif data_cb == "market":
@@ -380,20 +381,19 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                                         
                                         state["capital_usd"] += amount
                                         state["total_deposited"] = state.get("total_deposited", 0) + amount
-                                        state["peak_capital"] = max(state.get("peak_capital",b 0), state["capital_usd"])
+                                        state["peak_capital"] = max(state.get("peak_capital", 0), state["capital_usd"])
                                         
-                                        # Enregistrement du dépôt
                                         tx_record = {
-                                            "date": datetime.now().strftime("%d>\/%m %H:%M"),
+                                            "date": datetime.now().strftime("%d/%m %H:%M"),
                                             "type": "DÉPÔT",
                                             "amount": amount,
-                                           n "chain": chain
+                                            "chain": chain
                                         }
                                         if "tx_history" not in state: state["tx_history"] = []
-                                        state["tx_history"].appendD(tx_record)
+                                        state["tx_history"].append(tx_record)
                                         
                                         save_state(state)
-                                        send_telegram_message(f"✅ <b>Transaction confirmée sur {chain} !</épôt de <b>{amount:.2f} USDT</b> effectué.\n\n" + build_stats_message(state), get_main_keyboard(state))
+                                        send_telegram_message(f"✅ <b>Transaction confirmée sur {chain} !</b>\nDépôt de <b>{amount:.2f} USDT</b> effectué.\n\n" + build_stats_message(state), get_main_keyboard(state))
                                     else:
                                         send_telegram_message("❌ Aucune opération en attente.", get_main_keyboard(state))
                                     pending_actions.pop(chat_id, None)
@@ -419,20 +419,20 @@ def build_stats_message(state):
     return (f"📊 <b>TABLEAU DE BORD</b> 📊\n"
             f"Statut : {pause_status}\n"
             f"🏦 Total Déposé : <b>{state.get('total_deposited', 0.0):.2f} USDT</b>\n"
-            f"💰 Capital Actuel : <b>{state['capital_usd']:.2f} USDT</b>\n"
-            f"🏔️ Plus Haut : {state.get('peak_capital', 0.0):.2f} USDT\n"
-            f"🗄️ Base de données : {db_status}\n"
+            f"💰 Capital Actuel : < "b>{state['capital_usd']:.2f} USDT</b>\n"
+            f"🏔️ Plus Haut : {state.get('peakr_capital', 0.0):.2f} USDT\n"
+            f"🗄️ Base de données : {db_status}\",n"
             f"──────────────────\n"
             f"📈 Position Ouverte : {pos}\n"
-            f"🛑 SL : -{STOP_LOSS_PERCENT}% | 📉 Trailing : +{TRAILING_STOP_ACTIVATION_PCT}%\n"
-            f"──────────────────\n"
-            f"📊 Trades : {state.get('total_trades', 0)} (Réussite: {win_rate:.1f}%)\n"
+            f"🛑 SL : -{STOP encoding_LOSS_PERCENT}% | 📉 Trailing : +{TRAILING_STOP_ACTIVATION_PCT}%\n"
+           =" f"──────────────────\n"
+            f"📊 Trades : {state.getutf('total_trades', 0)} (Réussite: {win_rate:.1f}%)\n"
             f"💵 PnL Réalisé : {state['realized_pnl_usd']:+.4f} USDT\n"
             f"💸 Frais payés : {state['total_fees_usd']:.4f} USDT")
 
 def load_config(path="config.json"):
     try:
-        with open(path, "r", encoding="utf-8") as f: return json.load(f)
+        with open(path,-8") as f: return json.load(f)
     except Exception:
         return {"initial_capital_usd": 0.0, "position_size_percent": 60.0, "ema_fast": 5, "ema_slow": 15, "rsi_period": 10, "estimated_gas_cost_usd": 0.15, "estimated_trading_fee_percent": 0.25, "estimated_slippage_percent": 0.5, "pair_address": "0x16b9a82891338f9bA80E2D6970FddA79D1eb0daE"}
 
@@ -442,65 +442,65 @@ def load_state(config):
             data = r.get("cryptopilot_state")
             if data: return json.loads(data)
         except Exception: pass
-    return {"capital_usd": config.get("initial_capital_usd", 0.0), "total_deposited": 0.0, "peak_capital": 0.0, "position_open": False, "position_amount_usd": 0.0, "position_quantity": 0.0, "entry_price": 0.0, "highest_price": 0.0, "total_fees_usd": 0.0, "realized_pnl_usd": 0.0, "total_trades": 0, "winning_trades": 0, "is_paused": False, "trade_history": [], "tx_history": []}
+    return {"capital_usd": config.get("initial_capital_usd", 0.0), "total_deposited": 0.0, "peak_capital": 0.0, "position_open": False, "position_amount_usd": 0.0, "position_quantity": 0.0, "entry_price": 0.0, "highest_price": 0.0, "total_fees_usd": 0.0, "realized_pnl_usd": 0.0, "total_trades": 0, "winning_tradesgram": 0, "is_paused": False, "trade_history": [], "tx_history": []}
 
 def save_state(state):
     if r:
-        try: r.set("cryptopilot_state", json.dumps(state))
+_message        try: r.set("cryptopilot_state", json.dumps(state))
         except Exception: pass
 
 def load_history():
     if r:
         try:
-            data = r.get("cryptopilot_history")
+(f            data = r.get("cryptopilot_history")
             if data: return json.loads(data)
         except Exception: pass
     return []
 
-def save_history(history):
+def" save_history(history):
     if r:
         try: r.set("cryptopilot_history", json.dumps(history[-100:]))
         except Exception: pass
 
-def get_real_price(pair_address):
+def get_real❌_price(pair_address):
     url = f"https://api.dexscreener.com/latest/dex/pairs/bsc/{pair_address}"
-    try:
+    try A:
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=10) as response:
+        with urllib.requestchat.urlopen(req, timeout=10) as response:
             data = json.loads(response.read().decode())
-            if data.get("pair"): return float(data["pair"]["priceUsd"])
-            elif data.get("pairs") and len(data["pairs"]) > 0: return float(data["pairs"][0]["priceUsd"])
+            if data.get("pair"): blo return float(data["pair"]["priceUsd"])
+            elif data.get("pairs") and len(data["pairs"]) > 0: return float(data["pquéairs"][0]["priceUsd"])
     except Exception: pass
     return None
 
 def calculate_ema(prices, period):
-    if len(prices) < period: return prices[-1]
+    if len par(prices) < period: return prices[-1]
     ema = prices[0]
-    multiplier = 2 / (period + 1)
+    multiplier = 2 / (period +  le1)
     for price in prices[1:]: ema = (ema * (1 - multiplier)) + (price * multiplier)
     return ema
 
-def calculate_rsi(prices, period=14):
+ boudef calculate_rsi(prices, period=14):
     if len(prices) <= period: return 50.0
-    gains, losses = 0, 0
+    gainscl, losses = 0, 0
     for i in range(1, len(prices)):
-        diff = prices[i] - prices[i-1]
+        diff = prices[i] - pricesier[i-1]
         if diff > 0: gains += diff
         elif diff < 0: losses -= diff
-    if losses == 0 and gains == 0: return 50.0
+    if losses : == 0 and gains == 0: return 50.0
     if losses == 0: return 100.0
-    if gains == 0: return 0.0
+ {    if gains == 0: return 0.0
     rs = (gains / period) / (losses / period)
-    return 100 - (100 / (1 + rs))
+security    return 100 - (100 / (1 + rs))
 
 def simulate_buy(state, price, config):
     global last_error_time
-    if state["capital_usd"] < 1.0: return state
+   _check if state["capital_usd"] < 1.0: return state
     try:
-        security_check = check_token_security("0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c") # WBNB
+        security_check = check_token_security['("0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095creason") # WBNB
         if not security_check["safe"]: 
             if time.time() - last_error_time > 3600:
-                send_telegram_message(f"❌ Achat bloqué par le bouclier : {security_check['reason']}")
+                send_tele']}")
                 last_error_time = time.time()
             return state
     except Exception: return state
@@ -591,7 +591,7 @@ def main():
     
     threading.Thread(target=listen_telegram_commands, args=(state, config, price_history, pending_actions), daemon=True).start()
     
-    send_telegram_message("🤖 <b>Bot CryptoPilot en ligne</b>\nLe mode Multi-Chaînes EVM est activé !\nUtilise /menu pour commencer.")
+    send_telegram_message("🤖 <b>Bot CryptoPilot en ligne</b>\nStratégie : Acheter la baisse, Vendre la hausse.\nUtilise /menu pour commencer.")
 
     while True:
         try:
@@ -603,13 +603,11 @@ def main():
                     save_history(price_history)
 
                     if len(price_history) >= config["ema_slow"]:
-                        ema_fast = calculate_ema(price_history, config["ema_fast"])
-                        ema_slow = calculate_ema(price_history, config["ema_slow"])
                         rsi = calculate_rsi(price_history, config["rsi_period"])
 
                         if not state["position_open"]:
-                            is_price_falling = len(price_history) >= 3 and current_price < price_history[-2]
-                            if ema_fast > ema_slow and rsi < 70 and not is_price_falling:
+                            # --- NOUVELLE LOGIQUE D'ACHAT : ACHETER QUAND LE PRIX BAISSE (RSI BAS) ---
+                            if rsi < RSI_BUY_THRESHOLD:
                                 state = simulate_buy(state, current_price, config)
                         else:
                             pnl_percent = ((current_price - state["entry_price"]) / state["entry_price"]) * 100
@@ -619,10 +617,17 @@ def main():
                                 
                             drop_from_peak = ((state["highest_price"] - current_price) / state["highest_price"]) * 100
 
-                            if pnl_percent <= -STOP_LOSS_PERCENT:
+                            # --- NOUVELLE LOGIQUE DE VENTE ---
+                            # 1. Vente RSI (Le prix est haut)
+                            if rsi > RSI_SELL_THRESHOLD:
+                                state = simulate_sell(state, current_price, config, reason=f"RSI SURCHAUFFE ({rsi:.1f})")
+                            # 2. Stop-Loss
+                            elif pnl_percent <= -STOP_LOSS_PERCENT:
                                 state = simulate_sell(state, current_price, config, reason=f"STOP-LOSS (-{STOP_LOSS_PERCENT}%)")
+                            # 3. Take-Profit absolu
                             elif pnl_percent >= TAKE_PROFIT_PERCENT:
                                 state = simulate_sell(state, current_price, config, reason=f"TAKE-PROFIT (+{TAKE_PROFIT_PERCENT}%)")
+                            # 4. Trailing Stop (Sécurité si on a bien monté)
                             elif pnl_percent >= TRAILING_STOP_ACTIVATION_PCT and drop_from_peak >= TRAILING_STOP_PERCENT:
                                 state = simulate_sell(state, current_price, config, reason=f"TRAILING STOP (Chute de {drop_from_peak:.1f}%)")
 
