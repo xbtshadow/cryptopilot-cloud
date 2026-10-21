@@ -59,7 +59,7 @@ def get_main_keyboard(state):
         ]
     }
 
-# --- GESTION MULTI-CHAÎNES (EVM UNIQUEMENT) ---
+# --- GESTION DES WALLETS (Identique) ---
 def get_wallets(chat_id):
     wallets = {}
     if not r: return wallets
@@ -73,15 +73,10 @@ def get_wallets(chat_id):
 def generate_wallet(chat_id, slot, chain="BSC"):
     if not r: return "❌ Erreur : Redis non connecté."
     if not Account: return "❌ Erreur : librairie `eth-account` manquante."
-    
     try:
-        # Génération d'une adresse EVM (valide pour BSC, ETH, etc.)
         acct = Account.create()
-        address = acct.address
-        private_key = acct.key.hex()
-
-        r.set(f"wallet:{chat_id}:{slot}", json.dumps({"chain": chain, "address": address, "private_key": private_key}))
-        return f"✅ <b>Wallet {chain} généré (Emplacement {slot}) !</b>\n📍 <code>{address}</code>"
+        r.set(f"wallet:{chat_id}:{slot}", json.dumps({"chain": chain, "address": acct.address, "private_key": acct.key.hex()}))
+        return f"✅ <b>Wallet {chain} généré (Emplacement {slot}) !</b>\n📍 <code>{acct.address}</code>"
     except Exception as e: return f"❌ Erreur : {str(e)}"
 
 def delete_wallet(chat_id, slot):
@@ -107,7 +102,7 @@ def show_wallet_manager(chat_id):
     buttons.append([{"text": "⬅️ Retour", "callback_data": "back_menu"}])
     return msg, {"inline_keyboard": buttons}
 
-# --- MARCHÉ ---
+# --- MARCHÉ (Identique) ---
 def get_market_prices():
     msg = "🌐 <b>PRIX DU MARCHÉ</b> 🌐\n\n"
     url = "https://pro-api.coinmarketcap.com/public-api/v1/cryptocurrency/listings/latest?limit=20&convert=USD"
@@ -117,7 +112,6 @@ def get_market_prices():
             data = json.loads(response.read().decode())
             for coin in data.get("data", []):
                 sym = coin.get("symbol")
-                # On ne garde que BNB et ETH (EVM)
                 if sym in ["BNB", "ETH"]:
                     price = coin.get("quote", {}).get("USD", {}).get("price")
                     if price is not None:
@@ -152,7 +146,6 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                                 
                                 try:
                                     if action == "withdraw_address":
-                                        # L'utilisateur a envoyé une adresse de retrait
                                         address = text.strip()
                                         amount = action_data["amount"]
                                         chain = action_data["chain"]
@@ -161,29 +154,27 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                                             send_telegram_message("❌ Adresse invalide. Une adresse EVM doit commencer par '0x' et faire 42 caractères.", get_main_keyboard(state))
                                             continue
 
-                                        # On simule l'envoi
                                         state["capital_usd"] -= amount
                                         save_state(state)
-                                        send_telegram_message(f"✅ <b>Retrait initié !</b>\nEnvoi de <b>{amount:.2f} $</b> sur le réseau <b>{chain}</b> vers :\n<code>{address}</code>\n\n<i>(Simulation : Aucun fond réel n'a été envoyé).</i>\n\n" + build_stats_message(state), get_main_keyboard(state))
+                                        send_telegram_message(f"✅ <b>Retrait initié !</b>\nEnvoi de <b>{amount:.2f} USDT</b> sur le réseau <b>{chain}</b> vers :\n<code>{address}</code>\n\n<i>(Simulation : Aucun fond réel n'a été envoyé).</i>\n\n" + build_stats_message(state), get_main_keyboard(state))
                                         del pending_actions[chat_id]
                                         continue
 
-                                    # Dépôts et Retraits (saisie du montant)
                                     amount = float(text.replace(",", "."))
                                     if amount <= 0: raise ValueError
                                     
                                     if action == "deposit":
                                         pending_actions[chat_id] = {"action": "deposit", "amount": amount, "chain": action_data.get("chain", "BSC")}
                                         confirm_kb = {"inline_keyboard": [[{"text": "✅ Confirmer", "callback_data": "confirm_deposit"}], [{"text": "❌ Annuler", "callback_data": "cancel_action"}]]}
-                                        send_telegram_message(f"💰 Tu souhaites déposer <b>{amount:.2f} $</b> sur le réseau <b>{action_data.get('chain', 'BSC')}</b>.\nConfirmes-tu ?", confirm_kb)
+                                        send_telegram_message(f"💰 Tu souhaites déposer <b>{amount:.2f} USDT</b> sur le réseau <b>{action_data.get('chain', 'BSC')}</b>.\nConfirmes-tu ?", confirm_kb)
                                     
                                     elif action == "withdraw_amount":
                                         if amount > state["capital_usd"]:
-                                            send_telegram_message(f"❌ Fonds insuffisants. Capital : <b>{state['capital_usd']:.2f} $</b>.", get_main_keyboard(state))
+                                            send_telegram_message(f"❌ Fonds insuffisants. Capital : <b>{state['capital_usd']:.2f} USDT</b>.", get_main_keyboard(state))
                                             del pending_actions[chat_id]
                                         else:
                                             pending_actions[chat_id] = {"action": "withdraw_address", "amount": amount, "chain": action_data.get("chain", "BSC")}
-                                            send_telegram_message(f"💸 Tu souhaites retirer <b>{amount:.2f} $</b> sur le réseau <b>{action_data.get('chain', 'BSC')}</b>.\n\nEnvoie maintenant <b>l'adresse EVM de destination</b> (commençant par 0x...) :", None)
+                                            send_telegram_message(f"💸 Tu souhaites retirer <b>{amount:.2f} USDT</b> sur le réseau <b>{action_data.get('chain', 'BSC')}</b>.\n\nEnvoie maintenant <b>l'adresse EVM de destination</b> (commençant par 0x...) :", None)
 
                                 except ValueError:
                                     send_telegram_message("❌ Montant invalide. Envoie un nombre (ex: 50).", get_main_keyboard(state))
@@ -206,34 +197,44 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                                     hist = state.get("trade_history", [])
                                     if not hist: msg = "📜 Aucun trade enregistré."
                                     else:
-                                        msg = "📜 <b>5 DERNIERS TRADES</b>\n\n"
+                                        msg = "📜 <b>5 DERNIERS TRADES (USDT <-> BNB)</b>\n\n"
                                         for t in reversed(hist[-5:]):
                                             emoji = "🟢" if t['pnl'] > 0 else "🔴"
-                                            msg += f"{emoji} {t['date']}\nAchat: {t['entry']:.2f}$ | Vente: {t['exit']:.2f}$\nPnL: {t['pnl']:+.2f}$\n\n"
+                                            msg += f"{emoji} {t['date']}\nAchat: {t['entry']:.2f}$ | Vente: {t['exit']:.2f}$\nQuantité: {t.get('qty', 0):.4f} BNB\nPnL: {t['pnl']:+.2f} USDT\n\n"
                                     send_telegram_message(msg, get_main_keyboard(state))
                                 elif data_cb == "debug":
                                     msg = "🛠️ <b>MODE DEBUG</b> 🛠️\n\n"
-                                    msg += f"💰 Capital : {state['capital_usd']:.2f} $\n"
+                                    msg += f"💰 Capital : {state['capital_usd']:.2f} USDT\n"
                                     msg += f"Pause : {state.get('is_paused', False)}\n"
                                     msg += f"Trades total : {state.get('total_trades', 0)}\n"
-                                    msg += f"Historique en mémoire : {len(price_history)} points\n\n"
+                                    msg += f"Historique : {len(price_history)} points\n\n"
+                                    
                                     price = get_real_price(config.get("pair_address", "0x16b9a82891338f9bA80E2D6970FddA79D1eb0daE"))
                                     if not price: msg += "❌ Impossible de récupérer le prix."
                                     else:
-                                        msg += f"💹 Prix Actuel : {price:.3f} $\n"
+                                        msg += f"💹 Prix Actuel du BNB : {price:.3f} $\n"
                                         if len(price_history) < config["ema_slow"]:
                                             msg += f"⏳ Attente d'historique : {len(price_history)}/{config['ema_slow']} points."
                                         else:
                                             ema_f = calculate_ema(price_history, config["ema_fast"])
                                             ema_s = calculate_ema(price_history, config["ema_slow"])
                                             rsi = calculate_rsi(price_history, config["rsi_period"])
-                                            msg += f"📊 EMA5 : {ema_f:.2f}\n📉 EMA15 : {ema_s:.2f}\n🌡️ RSI : {rsi:.1f}\n\n"
-                                            if ema_f > ema_s and rsi < 70: msg += "✅ Condition d'ACHAT remplie !"
+                                            is_price_falling = len(price_history) >= 3 and price < price_history[-2]
+                                            
+                                            msg += f"📊 EMA5 : {ema_f:.2f}\n📉 EMA15 : {ema_s:.2f}\n🌡️ RSI : {rsi:.1f}\n"
+                                            msg += f"📉 Prix en baisse : {'OUI' if is_price_falling else 'NON'}\n\n"
+                                            
+                                            if ema_f > ema_s and rsi < 70:
+                                                if is_price_falling:
+                                                    msg += "⚠️ EMA et RSI OK, MAIS le prix est en train de chuter. Le bot attend que ça remonte."
+                                                else:
+                                                    msg += "✅ Toutes les conditions sont remplies ! Le bot va acheter du BNB avec tes USDT au prochain cycle."
                                             else:
                                                 msg += "⏳ Condition d'ACHAT NON remplie.\n"
                                                 if ema_f <= ema_s: msg += "  - Tendance baissière (EMA5 < EMA15)\n"
                                                 if rsi >= 70: msg += "  - Marché en surchauffe (RSI > 70)\n"
                                     send_telegram_message(msg, get_main_keyboard(state))
+
                                 elif data_cb == "market":
                                     send_telegram_message(get_market_prices(), get_main_keyboard(state))
                                 elif data_cb == "back_menu":
@@ -269,33 +270,30 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                                     msg, kb = show_wallet_manager(chat_id)
                                     send_telegram_message(msg, kb)
                                 
-                                # --- DÉPÔT : CHOIX DU RÉSEAU EVM ---
                                 elif data_cb == "deposit":
                                     net_kb = {"inline_keyboard": [
                                         [{"text": "🟡 BSC (BNB)", "callback_data": "dep_net_BSC"}],
                                         [{"text": "🔵 Ethereum (ETH)", "callback_data": "dep_net_ETH"}],
                                         [{"text": "❌ Annuler", "callback_data": "cancel_action"}]
                                     ]}
-                                    send_telegram_message("💰 <b>Dépôt</b>\nSur quel réseau EVM souhaites-tu déposer ?", net_kb)
+                                    send_telegram_message("💰 <b>Dépôt</b>\nSur quel réseau EVM souhaites-tu déposer des USDT ?", net_kb)
                                 elif data_cb.startswith("dep_net_"):
                                     chain = data_cb.split("_")[2]
                                     pending_actions[chat_id] = {"action": "deposit", "amount": 0, "chain": chain}
-                                    send_telegram_message(f"💰 <b>Dépôt sur {chain}</b>\nQuel montant en $ souhaites-tu déposer ? (ex: 50)", None)
+                                    send_telegram_message(f"💰 <b>Dépôt sur {chain}</b>\nQuel montant en USDT souhaites-tu déposer ? (ex: 50)", None)
 
-                                # --- RETRAIT : CHOIX DU RÉSEAU EVM ---
                                 elif data_cb == "withdraw":
                                     net_kb = {"inline_keyboard": [
                                         [{"text": "🟡 BSC (BNB)", "callback_data": "wd_net_BSC"}],
                                         [{"text": "🔵 Ethereum (ETH)", "callback_data": "wd_net_ETH"}],
                                         [{"text": "❌ Annuler", "callback_data": "cancel_action"}]
                                     ]}
-                                    send_telegram_message("💸 <b>Retrait</b>\nSur quel réseau EVM souhaites-tu retirer ?", net_kb)
+                                    send_telegram_message("💸 <b>Retrait</b>\nSur quel réseau EVM souhaites-tu retirer tes USDT ?", net_kb)
                                 elif data_cb.startswith("wd_net_"):
                                     chain = data_cb.split("_")[2]
                                     pending_actions[chat_id] = {"action": "withdraw_amount", "amount": 0, "chain": chain}
-                                    send_telegram_message(f"💸 <b>Retrait sur {chain}</b>\nQuel montant en $ souhaites-tu retirer ? (ex: 20)", None)
+                                    send_telegram_message(f"💸 <b>Retrait sur {chain}</b>\nQuel montant en USDT souhaites-tu retirer ? (ex: 20)", None)
 
-                                # --- VALIDATION DU DÉPÔT ---
                                 elif data_cb == "confirm_deposit":
                                     if chat_id in pending_actions and pending_actions[chat_id].get("amount", 0) > 0:
                                         amount = pending_actions[chat_id]["amount"]
@@ -308,7 +306,7 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                                         state["total_deposited"] = state.get("total_deposited", 0) + amount
                                         state["peak_capital"] = max(state.get("peak_capital", 0), state["capital_usd"])
                                         save_state(state)
-                                        send_telegram_message(f"✅ <b>Transaction confirmée sur {chain} !</b>\nDépôt de <b>{amount:.2f} $</b> effectué.\n\n" + build_stats_message(state), get_main_keyboard(state))
+                                        send_telegram_message(f"✅ <b>Transaction confirmée sur {chain} !</b>\nDépôt de <b>{amount:.2f} USDT</b> effectué.\n\n" + build_stats_message(state), get_main_keyboard(state))
                                     else:
                                         send_telegram_message("❌ Aucune opération en attente.", get_main_keyboard(state))
                                     pending_actions.pop(chat_id, None)
@@ -333,17 +331,17 @@ def build_stats_message(state):
     pause_status = "⏸️ EN PAUSE" if state.get("is_paused", False) else "🟢 ACTIF"
     return (f"📊 <b>TABLEAU DE BORD</b> 📊\n"
             f"Statut : {pause_status}\n"
-            f"🏦 Total Déposé : <b>{state.get('total_deposited', 0.0):.2f} $</b>\n"
-            f"💰 Capital Actuel : <b>{state['capital_usd']:.2f} $</b>\n"
-            f"🏔️ Plus Haut : {state.get('peak_capital', 0.0):.2f} $\n"
+            f"🏦 Total Déposé : <b>{state.get('total_deposited', 0.0):.2f} USDT</b>\n"
+            f"💰 Capital Actuel : <b>{state['capital_usd']:.2f} USDT</b>\n"
+            f"🏔️ Plus Haut : {state.get('peak_capital', 0.0):.2f} USDT\n"
             f"🗄️ Base de données : {db_status}\n"
             f"──────────────────\n"
             f"📈 Position Ouverte : {pos}\n"
             f"🛑 SL : -{STOP_LOSS_PERCENT}% | 📉 Trailing : +{TRAILING_STOP_ACTIVATION_PCT}%\n"
             f"──────────────────\n"
             f"📊 Trades : {state.get('total_trades', 0)} (Réussite: {win_rate:.1f}%)\n"
-            f"💵 PnL Réalisé : {state['realized_pnl_usd']:+.4f} $\n"
-            f"💸 Frais payés : {state['total_fees_usd']:.4f} $")
+            f"💵 PnL Réalisé : {state['realized_pnl_usd']:+.4f} USDT\n"
+            f"💸 Frais payés : {state['total_fees_usd']:.4f} USDT")
 
 def load_config(path="config.json"):
     try:
@@ -357,7 +355,7 @@ def load_state(config):
             data = r.get("cryptopilot_state")
             if data: return json.loads(data)
         except Exception: pass
-    return {"capital_usd": config.get("initial_capital_usd", 0.0), "total_deposited": 0.0, "peak_capital": 0.0, "position_open": False, "position_amount_usd": 0.0, "entry_price": 0.0, "highest_price": 0.0, "total_fees_usd": 0.0, "realized_pnl_usd": 0.0, "total_trades": 0, "winning_trades": 0, "is_paused": False, "trade_history": []}
+    return {"capital_usd": config.get("initial_capital_usd", 0.0), "total_deposited": 0.0, "peak_capital": 0.0, "position_open": False, "position_amount_usd": 0.0, "position_quantity": 0.0, "entry_price": 0.0, "highest_price": 0.0, "total_fees_usd": 0.0, "realized_pnl_usd": 0.0, "total_trades": 0, "winning_trades": 0, "is_paused": False, "trade_history": []}
 
 def save_state(state):
     if r:
@@ -420,39 +418,57 @@ def simulate_buy(state, price, config):
             return state
     except Exception: return state
 
-    amount_usd = state["capital_usd"] * (config["position_size_percent"] / 100.0)
+    # Montant en USDT à utiliser
+    amount_usdt = state["capital_usd"] * (config["position_size_percent"] / 100.0)
+    
+    # Calcul des frais
     gas = config["estimated_gas_cost_usd"]
-    fee = amount_usd * (config["estimated_trading_fee_percent"] / 100.0)
-    slippage = amount_usd * (config["estimated_slippage_percent"] / 100.0)
-    total_cost = amount_usd + gas + fee + slippage
+    fee = amount_usdt * (config["estimated_trading_fee_percent"] / 100.0)
+    slippage = amount_usdt * (config["estimated_slippage_percent"] / 100.0)
+    total_cost = amount_usdt + gas + fee + slippage
 
     if total_cost > state["capital_usd"]: return state
 
+    # Calcul de la quantité de BNB achetée
+    quantity = amount_usdt / price
+
+    # Mise à jour de l'état
     state["capital_usd"] -= total_cost
     state["position_open"] = True
-    state["position_amount_usd"] = amount_usd
+    state["position_amount_usd"] = amount_usdt
+    state["position_quantity"] = quantity
     state["entry_price"] = price
     state["highest_price"] = price
     state["total_fees_usd"] += gas + fee
-    send_telegram_message(f"🚀 ACHAT !\nPrix : {price:.3f} $\nMontant : {amount_usd:.2f} $\nCapital restant : {state['capital_usd']:.2f} $")
+    
+    # Notification claire : USDT -> BNB
+    send_telegram_message(f"🚀 <b>ACHAT</b>\nAcheté : <b>{quantity:.4f} BNB</b>\nAvec : {amount_usdt:.2f} USDT\nPrix : {price:.3f} $")
     return state
 
 def simulate_sell(state, price, config, reason="Signal"):
     if not state["position_open"]: return state
 
-    amount_usd = state["position_amount_usd"]
-    current_value = amount_usd * (price / state["entry_price"])
+    quantity = state["position_quantity"]
+    amount_usdt = state["position_amount_usd"]
+    
+    # Calcul de la valeur actuelle en USDT
+    current_value = quantity * price
+    
+    # Calcul des frais
     gas = config["estimated_gas_cost_usd"]
     fee = current_value * (config["estimated_trading_fee_percent"] / 100.0)
     slippage = current_value * (config["estimated_slippage_percent"] / 100.0)
     net_proceeds = current_value - gas - fee - slippage
 
-    pnl = net_proceeds - amount_usd - gas
+    pnl = net_proceeds - amount_usdt - gas
+    
+    # Mise à jour de l'état
     state["capital_usd"] += net_proceeds
     state["total_fees_usd"] += gas + fee
     state["realized_pnl_usd"] += pnl
     state["position_open"] = False
     state["position_amount_usd"] = 0.0
+    state["position_quantity"] = 0.0
     state["entry_price"] = 0.0
     state["highest_price"] = 0.0
     
@@ -463,13 +479,15 @@ def simulate_sell(state, price, config, reason="Signal"):
         "date": datetime.now().strftime("%d/%m %H:%M"),
         "entry": state["entry_price"] if state["entry_price"] else 0,
         "exit": price,
+        "qty": quantity,
         "pnl": pnl
     }
     if "trade_history" not in state: state["trade_history"] = []
     state["trade_history"].append(trade_record)
 
+    # Notification claire : BNB -> USDT
     emoji = "💰" if pnl > 0 else "🛑"
-    send_telegram_message(f"{emoji} VENTE ({reason}) !\nPrix : {price:.3f} $\nPnL Net : {pnl:+.4f} $\nCapital Actuel : {state['capital_usd']:.2f} $")
+    send_telegram_message(f"{emoji} <b>VENTE ({reason})</b>\nVendu : <b>{quantity:.4f} BNB</b>\nReçu : {net_proceeds:.2f} USDT\nPrix : {price:.3f} $\nPnL Net : {pnl:+.4f} USDT")
     return state
 
 class WebHandler(BaseHTTPRequestHandler):
@@ -539,7 +557,7 @@ def main():
                         drawdown = ((state["peak_capital"] - state["capital_usd"]) / state["peak_capital"]) * 100
                         if drawdown >= MAX_DRAWDOWN_PERCENT and not state.get("is_paused", False):
                             state["is_paused"] = True
-                            send_telegram_message(f"🚨 <b>PROTECTION DE PORTEFEUILLE ACTIVÉE !</b> 🚨\nTon capital a baissé de {drawdown:.1f}% par rapport à son plus haut ({state['peak_capital']:.2f} $).\nLe bot a été mis en pause automatiquement pour sécuriser les <b>{state['capital_usd']:.2f} $</b> restants.")
+                            send_telegram_message(f"🚨 <b>PROTECTION DE PORTEFEUILLE ACTIVÉE !</b> 🚨\nTon capital a baissé de {drawdown:.1f}% par rapport à son plus haut ({state['peak_capital']:.2f} USDT).\nLe bot a été mis en pause automatiquement pour sécuriser les <b>{state['capital_usd']:.2f} USDT</b> restants.")
 
                     save_state(state)
         except Exception as e: print(f"Erreur : {e}")
