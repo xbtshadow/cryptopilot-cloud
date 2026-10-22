@@ -15,17 +15,23 @@ except ImportError:
     Account = None
 
 # ==========================================
-# 🛑 PARAMÈTRES DE TRADING
+# 🛑 PARAMÈTRES DE L'AGENT (Le Cerveau)
 # ==========================================
-STOP_LOSS_PERCENT = 5.0              
-TRAILING_STOP_ACTIVATION_PCT = 10.0  
-TRAILING_STOP_PERCENT = 2.0          
-TAKE_PROFIT_PERCENT = 50.0           
+STOP_LOSS_PERCENT = 2.0              
+TRAILING_STOP_ACTIVATION_PCT = 1.5   
+TRAILING_STOP_PERCENT = 0.5          
 MAX_DRAWDOWN_PERCENT = 20.0          
 ITEMS_PER_PAGE = 5
 
-RSI_BUY_THRESHOLD = 40.0  
-RSI_SELL_THRESHOLD = 70.0 
+RSI_BUY_THRESHOLD = 35.0             
+RSI_SELL_THRESHOLD = 70.0            
+EMA_FAST = 7                         
+EMA_SLOW = 21                        
+
+# --- SÉCURITÉ ANTI-FRAIS ---
+MIN_NET_PROFIT_USDT = 0.20 
+ESTIMATED_FEES_USDT = 0.30 
+POSITION_SIZE_PCT = 90.0   
 
 REDIS_URL = os.getenv("REDIS_URL")
 r = None
@@ -38,8 +44,6 @@ if REDIS_URL:
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
-
-last_error_time = 0
 
 def send_telegram_message(message, reply_markup=None):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return 
@@ -65,6 +69,7 @@ def get_main_keyboard(state):
         ]
     }
 
+# --- GESTION DES WALLETS ---
 def get_wallets(chat_id):
     wallets = {}
     if not r: return wallets
@@ -72,8 +77,7 @@ def get_wallets(chat_id):
         for slot in [1, 2]:
             data = r.get("wallet:" + str(chat_id) + ":" + str(slot))
             if data: wallets[slot] = json.loads(data)
-    except Exception:
-        pass
+    except Exception: pass
     return wallets
 
 def generate_wallet(chat_id, slot, chain="BSC"):
@@ -83,16 +87,14 @@ def generate_wallet(chat_id, slot, chain="BSC"):
         acct = Account.create()
         r.set("wallet:" + str(chat_id) + ":" + str(slot), json.dumps({"chain": chain, "address": acct.address, "private_key": acct.key.hex()}))
         return "✅ Wallet " + chain + " généré !"
-    except Exception:
-        return "❌ Erreur génération"
+    except Exception: return "❌ Erreur génération"
 
 def delete_wallet(chat_id, slot):
     if not r: return "❌ Erreur Redis"
     try:
         r.delete("wallet:" + str(chat_id) + ":" + str(slot))
         return "🗑️ Wallet supprimé."
-    except Exception:
-        return "❌ Erreur supression"
+    except Exception: return "❌ Erreur supression"
 
 def show_wallet_manager(chat_id):
     wallets = get_wallets(chat_id)
@@ -110,6 +112,7 @@ def show_wallet_manager(chat_id):
     buttons.append([{"text": "⬅️ Retour", "callback_data": "back_menu"}])
     return msg, {"inline_keyboard": buttons}
 
+# --- MARCHÉ GLOBAL ---
 def get_market_prices():
     msg = "🌐 <b>PRIX DU MARCHÉ</b> 🌐\n\n"
     url = "https://pro-api.coinmarketcap.com/public-api/v1/cryptocurrency/listings/latest?limit=20&convert=USD"
@@ -119,32 +122,28 @@ def get_market_prices():
             data = json.loads(response.read().decode())
             for coin in data.get("data", []):
                 sym = coin.get("symbol")
-                if sym in ["BNB", "ETH"]:
+                if sym in ["BNB", "ETH", "BTC"]:
                     price = coin.get("quote", {}).get("USD", {}).get("price")
                     if price is not None:
                         msg += "💎 <b>" + sym + "</b> : " + str(round(price, 2)) + " $\n"
             return msg
-    except Exception:
-        return "❌ Impossible de récupérer les prix."
+    except Exception: return "❌ Impossible de récupérer les prix."
 
+# --- HISTORIQUES PAGINÉS ---
 def build_trade_history_msg(state, page):
     hist = state.get("trade_history", [])
     if not hist: return "📜 Aucun trade.", get_main_keyboard(state)
-    
     total_pages = (len(hist) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
     if page < 0: page = 0
     if page >= total_pages: page = total_pages - 1
-    
     reversed_hist = list(reversed(hist))
     start = page * ITEMS_PER_PAGE
     end = start + ITEMS_PER_PAGE
     page_items = reversed_hist[start:end]
-
     msg = "📜 <b>HISTORIQUE DES TRADES</b> (" + str(page+1) + "/" + str(total_pages) + ")\n\n"
     for t in page_items:
         emoji = "🟢" if t['pnl'] > 0 else "🔴"
         msg += emoji + " " + t['date'] + "\nAchat: " + str(round(t['entry'], 2)) + " | Vente: " + str(round(t['exit'], 2)) + "\nQty: " + str(round(t.get('qty', 0), 4)) + " BNB\nPnL: " + str(round(t['pnl'], 2)) + " USDT\n\n"
-
     buttons = []
     nav_row = []
     if page > 0: nav_row.append({"text": "⬅️ Précédent", "callback_data": "history_page_" + str(page-1)})
@@ -156,16 +155,13 @@ def build_trade_history_msg(state, page):
 def build_tx_history_msg(state, page):
     hist = state.get("tx_history", [])
     if not hist: return "🧾 Aucune transaction.", get_main_keyboard(state)
-    
     total_pages = (len(hist) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
     if page < 0: page = 0
     if page >= total_pages: page = total_pages - 1
-    
     reversed_hist = list(reversed(hist))
     start = page * ITEMS_PER_PAGE
     end = start + ITEMS_PER_PAGE
     page_items = reversed_hist[start:end]
-
     msg = "🧾 <b>HISTORIQUE DES TRANSACTIONS</b> (" + str(page+1) + "/" + str(total_pages) + ")\n\n"
     for t in page_items:
         emoji = "🟢" if t['type'] == "DEPOT" else "🔴"
@@ -173,7 +169,6 @@ def build_tx_history_msg(state, page):
         if t.get('address'):
             msg += "Adresse: <code>" + t['address'] + "</code>\n"
         msg += "\n"
-
     buttons = []
     nav_row = []
     if page > 0: nav_row.append({"text": "⬅️ Précédent", "callback_data": "tx_history_page_" + str(page-1)})
@@ -182,6 +177,42 @@ def build_tx_history_msg(state, page):
     buttons.append([{"text": "⬅️ Menu", "callback_data": "back_menu"}])
     return msg, {"inline_keyboard": buttons}
 
+# --- CALCULS DE L'AGENT ---
+def calculate_ema(prices, period):
+    if len(prices) < period: return prices[-1]
+    ema = prices[0]
+    multiplier = 2 / (period + 1)
+    for price in prices[1:]: ema = (ema * (1 - multiplier)) + (price * multiplier)
+    return ema
+
+def calculate_rsi(prices, period=14):
+    if len(prices) <= period: return 50.0
+    gains, losses = 0, 0
+    for i in range(1, len(prices)):
+        diff = prices[i] - prices[i-1]
+        if diff > 0: gains += diff
+        elif diff < 0: losses -= diff
+    if losses == 0 and gains == 0: return 50.0
+    if losses == 0: return 100.0
+    if gains == 0: return 0.0
+    rs = (gains / period) / (losses / period)
+    return 100 - (100 / (1 + rs))
+
+def get_agent_decision(price_history, current_price):
+    if len(price_history) < EMA_SLOW: return "ATTENDRE"
+    rsi = calculate_rsi(price_history, 14)
+    ema_f = calculate_ema(price_history, EMA_FAST)
+    ema_s = calculate_ema(price_history, EMA_SLOW)
+    
+    is_dip = rsi < RSI_BUY_THRESHOLD
+    is_trend_up = ema_f > ema_s
+    is_bouncing = current_price >= price_history[-2]
+    
+    if is_dip and is_trend_up and is_bouncing: return "ACHETER"
+    elif rsi > RSI_SELL_THRESHOLD: return "VENDRE"
+    return "ATTENDRE"
+
+# --- COMMANDES TELEGRAM ---
 def listen_telegram_commands(state, config, price_history, pending_actions):
     last_update_id = 0
     while True:
@@ -204,17 +235,14 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                             elif chat_id in pending_actions:
                                 action_data = pending_actions[chat_id]
                                 action = action_data["action"]
-                                
                                 try:
                                     if action == "withdraw_address":
                                         address = text.strip()
                                         amount = action_data["amount"]
                                         chain = action_data["chain"]
-                                        
                                         if not address.startswith("0x") or len(address) != 42:
                                             send_telegram_message("❌ Adresse invalide.", get_main_keyboard(state))
                                             continue
-
                                         state["capital_usd"] -= amount
                                         tx_record = {"date": datetime.now().strftime("%d/%m %H:%M"), "type": "RETRAIT", "amount": amount, "chain": chain, "address": address}
                                         if "tx_history" not in state: state["tx_history"] = []
@@ -223,15 +251,12 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                                         send_telegram_message("✅ Retrait initié !", get_main_keyboard(state))
                                         del pending_actions[chat_id]
                                         continue
-
                                     amount = float(text.replace(",", "."))
                                     if amount <= 0: raise ValueError
-                                    
                                     if action == "deposit":
                                         pending_actions[chat_id] = {"action": "deposit", "amount": amount, "chain": action_data.get("chain", "BSC")}
                                         confirm_kb = {"inline_keyboard": [[{"text": "✅ Confirmer", "callback_data": "confirm_deposit"}], [{"text": "❌ Annuler", "callback_data": "cancel_action"}]]}
                                         send_telegram_message("💰 Déposer " + str(round(amount, 2)) + " USDT ?", confirm_kb)
-                                    
                                     elif action == "withdraw_amount":
                                         if amount > state["capital_usd"]:
                                             send_telegram_message("❌ Fonds insuffisants.", get_main_keyboard(state))
@@ -239,7 +264,6 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                                         else:
                                             pending_actions[chat_id] = {"action": "withdraw_address", "amount": amount, "chain": action_data.get("chain", "BSC")}
                                             send_telegram_message("💸 Envoie l'adresse de destination (0x...)", None)
-
                                 except ValueError:
                                     send_telegram_message("❌ Montant invalide.", get_main_keyboard(state))
                                     del pending_actions[chat_id]
@@ -248,7 +272,6 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                             callback = update["callback_query"]
                             chat_id = callback["message"]["chat"]["id"]
                             data_cb = callback["data"]
-                            
                             try:
                                 if data_cb == "stats":
                                     send_telegram_message(build_stats_message(state), get_main_keyboard(state))
@@ -266,31 +289,29 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                                     msg, kb = build_tx_history_msg(state, page)
                                     send_telegram_message(msg, kb)
                                 elif data_cb == "debug":
-                                    msg = "🛠️ <b>MODE DEBUG</b> 🛠️\n\n"
+                                    msg = "🛠️ <b>MODE DEBUG (Agent V4)</b> 🛠️\n\n"
                                     msg += "💰 Capital : " + str(round(state['capital_usd'], 2)) + " USDT\n"
                                     msg += "⏸️ Pause : " + str(state.get('is_paused', False)) + "\n"
-                                    price = get_real_price(config.get("pair_address", "0x16b9a82891338f9bA80E2D6970FddA79D1eb0daE"))
+                                    price = get_real_price(config.get("pair_address"))
                                     if not price: 
                                         msg += "❌ Erreur prix."
                                     else:
                                         msg += "💹 Prix BNB : " + str(round(price, 3)) + " $\n"
-                                        if len(price_history) < config["ema_slow"]:
+                                        if len(price_history) < EMA_SLOW:
                                             msg += "⏳ Attente historique."
                                         else:
-                                            rsi = calculate_rsi(price_history, config["rsi_period"])
+                                            rsi = calculate_rsi(price_history, 14)
+                                            ema_f = calculate_ema(price_history, EMA_FAST)
+                                            ema_s = calculate_ema(price_history, EMA_SLOW)
+                                            decision = get_agent_decision(price_history, price)
                                             msg += "🌡️ RSI : " + str(round(rsi, 1)) + "\n"
-                                            if not state["position_open"]:
-                                                if rsi < RSI_BUY_THRESHOLD:
-                                                    msg += "✅ OK pour ACHETER."
-                                                else:
-                                                    msg += "⏳ Prix trop haut."
-                                            else:
-                                                pnl_pct = ((price - state["entry_price"]) / state["entry_price"]) * 100
-                                                msg += "📈 PnL : " + str(round(pnl_pct, 2)) + "%\n"
-                                                if rsi > RSI_SELL_THRESHOLD:
-                                                    msg += "✅ OK pour VENDRE."
-                                                else:
-                                                    msg += "⏳ Attente vente."
+                                            msg += "📊 EMA Rapide : " + str(round(ema_f, 2)) + "\n"
+                                            msg += "📉 EMA Lente : " + str(round(ema_s, 2)) + "\n\n"
+                                            msg += "🧠 Décision : <b>" + decision + "</b>\n"
+                                            if decision == "ATTENDRE":
+                                                if rsi >= RSI_BUY_THRESHOLD: msg += "⏳ RSI trop haut.\n"
+                                                if ema_f <= ema_s: msg += "⏳ Tendance baissière.\n"
+                                                if len(price_history) > 2 and price < price_history[-2]: msg += "⏳ Le prix est en train de chuter.\n"
                                     send_telegram_message(msg, get_main_keyboard(state))
                                 elif data_cb == "market":
                                     send_telegram_message(get_market_prices(), get_main_keyboard(state))
@@ -306,8 +327,7 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                                     wallets = get_wallets(chat_id)
                                     if slot in wallets:
                                         send_telegram_message("⚠️ Clé privée : <code>" + wallets[slot]["private_key"] + "</code>", get_main_keyboard(state))
-                                    else: 
-                                        send_telegram_message("❌ Wallet introuvable.", get_main_keyboard(state))
+                                    else: send_telegram_message("❌ Wallet introuvable.", get_main_keyboard(state))
                                 elif data_cb.startswith("create_"):
                                     parts = data_cb.split("_")
                                     send_telegram_message(generate_wallet(chat_id, int(parts[2]), parts[1]))
@@ -359,12 +379,9 @@ def listen_telegram_commands(state, config, price_history, pending_actions):
                             except Exception as e:
                                 send_telegram_message("❌ Erreur bouton.", get_main_keyboard(state))
                             finally:
-                                try: 
-                                    urllib.request.urlopen("https://api.telegram.org/bot" + TELEGRAM_TOKEN + "/answerCallbackQuery?callback_query_id=" + callback['id'])
-                                except: 
-                                    pass
-        except Exception as e: 
-            print("Erreur bot")
+                                try: urllib.request.urlopen("https://api.telegram.org/bot" + TELEGRAM_TOKEN + "/answerCallbackQuery?callback_query_id=" + callback['id'])
+                                except: pass
+        except Exception: pass
         time.sleep(2)
 
 def build_stats_message(state):
@@ -374,20 +391,29 @@ def build_stats_message(state):
         win_rate = (state.get("winning_trades", 0) / state["total_trades"]) * 100
     pause_status = "⏸️ En Pause" if state.get("is_paused", False) else "🟢 Actif"
     
-    return ("📊 <b>TABLEAU DE BORD</b> 📊\n"
+    # Calcul Profit / Loss
+    total_pnl = state.get('realized_pnl_usd', 0.0)
+    total_loss = state.get('total_fees_usd', 0.0)
+    if total_pnl < 0: 
+        total_loss += abs(total_pnl)
+        total_pnl = 0
+    
+    return ("📊 <b>TABLEAU DE BORD (Agent V4)</b> 📊\n"
             "Statut : " + pause_status + "\n"
             "🏦 Total Déposé : " + str(round(state.get('total_deposited', 0.0), 2)) + " USDT\n"
             "💰 Capital : " + str(round(state['capital_usd'], 2)) + " USDT\n"
             "🏔️ Plus Haut : " + str(round(state.get('peak_capital', 0.0), 2)) + " USDT\n"
             "📈 Position : " + pos + "\n"
+            "──────────────────\n"
             "📊 Trades : " + str(state.get('total_trades', 0)) + " (" + str(round(win_rate, 1)) + "%)\n"
-            "💵 PnL : " + str(round(state['realized_pnl_usd'], 4)) + " USDT")
+            "🟢 Profit : +" + str(round(total_pnl, 4)) + " USDT\n"
+            "🔴 Loss/Frais : -" + str(round(total_loss, 4)) + " USDT")
 
 def load_config(path="config.json"):
     try:
         with open(path, "r", encoding="utf-8") as f: return json.load(f)
     except Exception:
-        return {"initial_capital_usd": 0.0, "position_size_percent": 60.0, "ema_fast": 5, "ema_slow": 15, "rsi_period": 10, "estimated_gas_cost_usd": 0.15, "estimated_trading_fee_percent": 0.25, "estimated_slippage_percent": 0.5, "pair_address": "0x16b9a82891338f9bA80E2D6970FddA79D1eb0daE"}
+        return {"initial_capital_usd": 100.0, "estimated_gas_cost_usd": 0.15, "estimated_trading_fee_percent": 0.25, "estimated_slippage_percent": 0.5, "pair_address": "0x16b9a82891338f9bA80E2D6970FddA79D1eb0daE"}
 
 def load_state(config):
     if r:
@@ -395,7 +421,7 @@ def load_state(config):
             data = r.get("cryptopilot_state")
             if data: return json.loads(data)
         except Exception: pass
-    return {"capital_usd": config.get("initial_capital_usd", 0.0), "total_deposited": 0.0, "peak_capital": 0.0, "position_open": False, "position_amount_usd": 0.0, "position_quantity": 0.0, "entry_price": 0.0, "highest_price": 0.0, "total_fees_usd": 0.0, "realized_pnl_usd": 0.0, "total_trades": 0, "winning_trades": 0, "is_paused": False, "trade_history": [], "tx_history": []}
+    return {"capital_usd": config.get("initial_capital_usd", 100.0), "total_deposited": config.get("initial_capital_usd", 100.0), "peak_capital": config.get("initial_capital_usd", 100.0), "position_open": False, "position_amount_usd": 0.0, "position_quantity": 0.0, "entry_price": 0.0, "highest_price": 0.0, "total_fees_usd": 0.0, "realized_pnl_usd": 0.0, "total_trades": 0, "winning_trades": 0, "is_paused": False, "trade_history": [], "tx_history": []}
 
 def save_state(state):
     if r:
@@ -426,32 +452,14 @@ def get_real_price(pair_address):
     except Exception: pass
     return None
 
-def calculate_rsi(prices, period=14):
-    if len(prices) <= period: return 50.0
-    gains, losses = 0, 0
-    for i in range(1, len(prices)):
-        diff = prices[i] - prices[i-1]
-        if diff > 0: gains += diff
-        elif diff < 0: losses -= diff
-    if losses == 0 and gains == 0: return 50.0
-    if losses == 0: return 100.0
-    if gains == 0: return 0.0
-    rs = (gains / period) / (losses / period)
-    return 100 - (100 / (1 + rs))
-
 def simulate_buy(state, price, config):
-    global last_error_time
     if state["capital_usd"] < 1.0: return state
     try:
         security_check = check_token_security("0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c")
-        if not security_check["safe"]: 
-            if time.time() - last_error_time > 3600:
-                send_telegram_message("❌ Achat bloqué.")
-                last_error_time = time.time()
-            return state
+        if not security_check["safe"]: return state
     except Exception: return state
 
-    amount_usdt = state["capital_usd"] * (config["position_size_percent"] / 100.0)
+    amount_usdt = state["capital_usd"] * (POSITION_SIZE_PCT / 100.0)
     gas = config["estimated_gas_cost_usd"]
     fee = amount_usdt * (config["estimated_trading_fee_percent"] / 100.0)
     slippage = amount_usdt * (config["estimated_slippage_percent"] / 100.0)
@@ -460,7 +468,6 @@ def simulate_buy(state, price, config):
     if total_cost > state["capital_usd"]: return state
 
     quantity = amount_usdt / price
-
     state["capital_usd"] -= total_cost
     state["position_open"] = True
     state["position_amount_usd"] = amount_usdt
@@ -474,10 +481,9 @@ def simulate_buy(state, price, config):
 
 def simulate_sell(state, price, config, reason="Signal"):
     if not state["position_open"]: return state
-
     quantity = state["position_quantity"]
     amount_usdt = state["position_amount_usd"]
-    entry_price_saved = state["entry_price"] 
+    entry_price_saved = state["entry_price"]
     
     current_value = quantity * price
     gas = config["estimated_gas_cost_usd"]
@@ -486,7 +492,6 @@ def simulate_sell(state, price, config, reason="Signal"):
     net_proceeds = current_value - gas - fee - slippage
 
     pnl = net_proceeds - amount_usdt - gas
-    
     state["capital_usd"] += net_proceeds
     state["total_fees_usd"] += gas + fee
     state["realized_pnl_usd"] += pnl
@@ -495,16 +500,15 @@ def simulate_sell(state, price, config, reason="Signal"):
     state["position_quantity"] = 0.0
     state["entry_price"] = 0.0
     state["highest_price"] = 0.0
-    
     state["total_trades"] = state.get("total_trades", 0) + 1
     if pnl > 0: state["winning_trades"] = state.get("winning_trades", 0) + 1
-    
+
     trade_record = {"date": datetime.now().strftime("%d/%m %H:%M"), "entry": entry_price_saved, "exit": price, "qty": quantity, "pnl": pnl}
     if "trade_history" not in state: state["trade_history"] = []
     state["trade_history"].append(trade_record)
 
     emoji = "💰" if pnl > 0 else "🛑"
-    send_telegram_message(emoji + " <b>VENTE</b>\nVendu : " + str(round(quantity, 4)) + " BNB\nPrix : " + str(round(price, 3)) + " $\nPnL : " + str(round(pnl, 4)) + " USDT")
+    send_telegram_message(emoji + " <b>VENTE (" + reason + ")</b>\nVendu : " + str(round(quantity, 4)) + " BNB\nPrix : " + str(round(price, 3)) + " $\nPnL : " + str(round(pnl, 4)) + " USDT")
     return state
 
 class WebHandler(BaseHTTPRequestHandler):
@@ -531,40 +535,39 @@ def main():
     pending_actions = {}
     
     threading.Thread(target=listen_telegram_commands, args=(state, config, price_history, pending_actions), daemon=True).start()
-    
-    send_telegram_message("🤖 <b>Bot en ligne !</b>")
+    send_telegram_message("🤖 <b>Agent V4 en ligne.</b>\nTape /menu pour gérer ton bot.")
 
     while True:
         try:
             if not state.get("is_paused", False) and state["capital_usd"] > 1.0:
-                current_price = get_real_price(config.get("pair_address", "0x16b9a82891338f9bA80E2D6970FddA79D1eb0daE"))
+                current_price = get_real_price(config.get("pair_address"))
                 if current_price:
                     price_history.append(current_price)
                     if len(price_history) > 100: price_history.pop(0)
                     save_history(price_history)
 
-                    if len(price_history) >= config["ema_slow"]:
-                        rsi = calculate_rsi(price_history, config["rsi_period"])
+                    if len(price_history) >= EMA_SLOW:
+                        decision = get_agent_decision(price_history, current_price)
 
                         if not state["position_open"]:
-                            if rsi < RSI_BUY_THRESHOLD:
-                                state = simulate_buy(state, current_price, config)
+                            if decision == "ACHETER":
+                                expected_gain = (state["capital_usd"] * (POSITION_SIZE_PCT / 100.0)) * 0.02
+                                if expected_gain > (ESTIMATED_FEES_USDT + MIN_NET_PROFIT_USDT):
+                                    state = simulate_buy(state, current_price, config)
                         else:
                             pnl_percent = ((current_price - state["entry_price"]) / state["entry_price"]) * 100
-                            
                             if current_price > state.get("highest_price", state["entry_price"]):
                                 state["highest_price"] = current_price
-                                
                             drop_from_peak = ((state["highest_price"] - current_price) / state["highest_price"]) * 100
 
-                            if rsi > RSI_SELL_THRESHOLD:
-                                state = simulate_sell(state, current_price, config, reason="RSI")
+                            tp_dynamic_pct = ((ESTIMATED_FEES_USDT + MIN_NET_PROFIT_USDT) / state["position_amount_usd"]) * 100
+                            
+                            if decision == "VENDRE" or pnl_percent >= tp_dynamic_pct:
+                                state = simulate_sell(state, current_price, config, reason="Objectif")
                             elif pnl_percent <= -STOP_LOSS_PERCENT:
-                                state = simulate_sell(state, current_price, config, reason="SL")
-                            elif pnl_percent >= TAKE_PROFIT_PERCENT:
-                                state = simulate_sell(state, current_price, config, reason="TP")
+                                state = simulate_sell(state, current_price, config, reason="STOP-LOSS")
                             elif pnl_percent >= TRAILING_STOP_ACTIVATION_PCT and drop_from_peak >= TRAILING_STOP_PERCENT:
-                                state = simulate_sell(state, current_price, config, reason="TS")
+                                state = simulate_sell(state, current_price, config, reason="TRAILING STOP")
 
                     if state["capital_usd"] > state.get("peak_capital", 0):
                         state["peak_capital"] = state["capital_usd"]
@@ -573,7 +576,7 @@ def main():
                         drawdown = ((state["peak_capital"] - state["capital_usd"]) / state["peak_capital"]) * 100
                         if drawdown >= MAX_DRAWDOWN_PERCENT and not state.get("is_paused", False):
                             state["is_paused"] = True
-                            send_telegram_message("🚨 Protection activée. Bot en pause.")
+                            send_telegram_message("🚨 Drawdown atteint. Bot en pause.")
 
                     save_state(state)
         except Exception as e: print("Erreur")
