@@ -1,0 +1,20 @@
+# CryptoPilot EVM V2 - Autonomous Trading Bot
+
+CryptoPilot is a fully autonomous, multi-chain trading bot built natively in Python. It operates on a "Buy The Dip" strategy across BSC and Ethereum networks, using technical indicators (RSI & EMA) to make decisions.
+
+## Key Features
+- **Multi-Chain:** Scans both PancakeSwap (BSC) and Uniswap (ETH).
+- **Smart Agent Logic:** Buys only when RSI is low, trend is up, and price is bouncing (avoids falling knives).
+- **Infallible Memory:** Uses Redis to persist state (capital, trades, wallets) even if the server restarts.
+- **Advanced Security:** Integrated GoPlus anti-honeypot shield before every buy, plus a 20% max drawdown circuit breaker.
+- **Trailing Stop:** Dynamic profit protection that locks in gains.
+- **Telegram Interface:** Full control via an interactive inline keyboard (deposits, withdrawals, stats, history, Web3 wallet generation).
+- **Paper Trading:** Currently running in simulation mode with realistic fee calculation to protect the capital.
+
+## How to test
+1. Open Telegram and search for the bot: `@Shadow_BSC_bot`
+2. Send `/start` to open the menu.
+3. Click on "Deposer" (Deposit) to fund the virtual wallet.
+4. Click on "Debug" to see the AI agent's live market analysis (RSI, EMA, and trading decision).
+
+*Note: This bot does not execute real transactions on the blockchain. It is designed for backtesting and strategy validation.*
