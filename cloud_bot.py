@@ -28,7 +28,6 @@ RSI_SELL_THRESHOLD = 70.0
 EMA_FAST = 7                         
 EMA_SLOW = 21                        
 
-# --- SÉCURITÉ ANTI-FRAIS ---
 MIN_NET_PROFIT_USDT = 0.20 
 ESTIMATED_FEES_USDT = 0.30 
 POSITION_SIZE_PCT = 90.0   
@@ -69,7 +68,6 @@ def get_main_keyboard(state):
         ]
     }
 
-# --- GESTION DES WALLETS ---
 def get_wallets(chat_id):
     wallets = {}
     if not r: return wallets
@@ -112,7 +110,6 @@ def show_wallet_manager(chat_id):
     buttons.append([{"text": "⬅️ Retour", "callback_data": "back_menu"}])
     return msg, {"inline_keyboard": buttons}
 
-# --- MARCHÉ GLOBAL ---
 def get_market_prices():
     msg = "🌐 <b>PRIX DU MARCHÉ</b> 🌐\n\n"
     url = "https://pro-api.coinmarketcap.com/public-api/v1/cryptocurrency/listings/latest?limit=20&convert=USD"
@@ -129,7 +126,6 @@ def get_market_prices():
             return msg
     except Exception: return "❌ Impossible de récupérer les prix."
 
-# --- HISTORIQUES PAGINÉS ---
 def build_trade_history_msg(state, page):
     hist = state.get("trade_history", [])
     if not hist: return "📜 Aucun trade.", get_main_keyboard(state)
@@ -177,7 +173,6 @@ def build_tx_history_msg(state, page):
     buttons.append([{"text": "⬅️ Menu", "callback_data": "back_menu"}])
     return msg, {"inline_keyboard": buttons}
 
-# --- CALCULS DE L'AGENT ---
 def calculate_ema(prices, period):
     if len(prices) < period: return prices[-1]
     ema = prices[0]
@@ -212,7 +207,6 @@ def get_agent_decision(price_history, current_price):
     elif rsi > RSI_SELL_THRESHOLD: return "VENDRE"
     return "ATTENDRE"
 
-# --- COMMANDES TELEGRAM ---
 def listen_telegram_commands(state, config, price_history, pending_actions):
     last_update_id = 0
     while True:
@@ -391,7 +385,6 @@ def build_stats_message(state):
         win_rate = (state.get("winning_trades", 0) / state["total_trades"]) * 100
     pause_status = "⏸️ En Pause" if state.get("is_paused", False) else "🟢 Actif"
     
-    # Calcul Profit / Loss
     total_pnl = state.get('realized_pnl_usd', 0.0)
     total_loss = state.get('total_fees_usd', 0.0)
     if total_pnl < 0: 
