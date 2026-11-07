@@ -15,7 +15,7 @@ except ImportError:
     Account = None
 
 # ==========================================
-# 🛑 PARAMÈTRES DE L'AGENT (Le Cerveau)
+# 🛑 PARAMÈTRES DE L'AGENT
 # ==========================================
 STOP_LOSS_PERCENT = 2.0              
 TRAILING_STOP_ACTIVATION_PCT = 1.5   
@@ -41,6 +41,7 @@ if REDIS_URL:
     except Exception as e:
         print("Erreur Redis")
 
+# --- C'EST ICI QUE LE CODE LIT TES SECRETS ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
